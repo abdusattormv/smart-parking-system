@@ -10,7 +10,7 @@
 |---|---|
 | Project | Smart Parking System — Intelligent Edge Computing |
 | Duration | 6 weeks (Week 3 → Week 8) |
-| Current week | Week 4 — Dataset + ML model presentation |
+| Current week | Week 5 — Training + edge refinement |
 | Edge device | MacBook (Apple Silicon MPS / Intel CPU) |
 | Inference stack | Python · OpenCV · YOLOv8 (ultralytics) · requests |
 | Backend | Python · FastAPI · SQLite (minimal — result logging only) |
@@ -253,7 +253,7 @@ The backend exists only to receive and log edge results and expose the latest sn
 
 ## 12. Week-by-week delivery plan
 
-- Week 4: dataset overview, model comparison plan, training config, `detect.py` skeleton, mock FastAPI, live static-image demo
+- Week 4: completed - dataset overview, model comparison plan, training config, `detect.py` skeleton, mock FastAPI, live static-image demo
 - Week 5: train YOLOv8n and YOLOv8s, finish ROI and smoothing logic, deliver `best.pt` and `best.onnx`
 - Week 6: optional YOLOv8m, INT8 export, confidence and IoU sweeps, full end-to-end integration
 - Week 7: final evaluation tables and figures, FPS and latency benchmarks, system stability test
@@ -261,10 +261,19 @@ The backend exists only to receive and log edge results and expose the latest sn
 
 ## 13. Acceptance criteria
 
-- Week 4: dataset and training plan are presented, demo runs live, all four members speak
+- Week 4: completed - dataset and training plan were presented, the static-image demo package was implemented, and all four members have a defined speaking role
 - Week 5–6: trained model loads on the MacBook, ROI and smoothing work, full local pipeline runs
 - Week 7: model comparison table, INT8 comparison, per-weather results, and bandwidth analysis are complete
 - Week 8: report is submitted and the live demo works in class
+
+## 13A. Current project status after Week 4
+
+- PRD updated to the ML-team and Edge-team structure
+- Week 4 demo package implemented
+- `edge/detect.py` added for static-image inference with terminal JSON output
+- `backend/main.py` added for mock `POST /update`
+- dataset and model comparison notes documented for presentation use
+- ROI logic, smoothing, training runs, ONNX benchmarking, and SQLite logging remain Week 5+ work
 
 ## 14. Technical report outline
 
