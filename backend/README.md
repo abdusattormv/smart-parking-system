@@ -1,12 +1,22 @@
-# Backend Layer
+# Backend Notes
 
-FastAPI service for receiving occupancy updates and serving dashboard data.
+The backend is no longer a core delivery track for this project revision.
 
-Planned responsibilities:
+## Current Scope
 
-- receive spot updates from the edge client
-- validate payloads
-- store current state in SQLite
-- record history for charting and evaluation
-- expose status, history, and stats endpoints
+For the revised ML + edge plan, backend work is optional and limited to lightweight support only if the team needs it for local logging or simple result collection.
 
+## Not Required for Core Delivery
+
+- no mandatory public API
+- no database requirement
+- no real-time dashboard integration
+- no backend dependency for the final demo
+
+## Future Extension
+
+If the team later wants a support service, it should stay minimal and local:
+
+- accept occupancy results from the edge script
+- store simple evaluation logs
+- avoid becoming a required dependency for Week 7 or Week 8 deliverables

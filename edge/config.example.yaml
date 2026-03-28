@@ -1,0 +1,23 @@
+# Example configuration for the local edge pipeline.
+
+model:
+  path: artifacts/models/best.pt
+  input_size: 640
+  confidence_threshold: 0.25
+  iou_threshold: 0.45
+  device: mps
+
+input:
+  mode: image
+  image_path: samples/parking-lot.jpg
+  camera_index: 0
+  frame_interval_ms: 250
+
+postprocess:
+  smoothing_window: 5
+  occupancy_overlap_threshold: 0.2
+
+logging:
+  output_dir: logs
+  format: csv
+  include_confidence: true

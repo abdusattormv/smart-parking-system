@@ -1,0 +1,67 @@
+# Environment Setup
+
+This project now uses a shared Python environment for both ML and edge work.
+
+## Recommended Local Setup
+
+- macOS on Apple Silicon or Intel
+- Python 3.9+ available as `python3`
+- one project virtual environment in `.venv`
+
+Current machine check from this repo:
+
+- Python: `3.9.6`
+- Architecture: `arm64`
+
+## Quick Start
+
+From the project root:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+pip install -r requirements-dev.txt
+```
+
+Or with `make`:
+
+```bash
+make install-dev
+```
+
+## Dependency Groups
+
+`requirements.txt`
+
+- runtime packages for dataset prep, training, inference, plotting, and local logging
+
+`requirements-dev.txt`
+
+- runtime packages plus notebook, test, and formatting tools
+
+## Project Conventions
+
+- use one shared `.venv` at the repo root
+- save trained model artifacts under `artifacts/models/`
+- save edge and evaluation logs under `logs/`
+- keep local configuration in a copied file such as `edge/config.yaml`
+- use [edge/config.example.yaml](https://github.com/thebkht/smart-parking-system/blob/main/edge/config.example.yaml) as the starting point
+
+## Notes for This Project
+
+- `opencv-python` is used instead of `opencv-python-headless` because the edge track needs webcam support
+- `onnxruntime` is included for optional ONNX inference paths
+- the backend and frontend are not required for the current milestone flow
+
+## First Tasks After Install
+
+1. Copy `edge/config.example.yaml` to `edge/config.yaml`
+2. Create `artifacts/models/` and `logs/` as needed during local work
+3. Verify the environment:
+
+```bash
+python -c "import cv2, ultralytics, yaml; print('env ok')"
+```
+
+4. Start with dataset preparation and the first YOLO baseline

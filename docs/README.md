@@ -1,12 +1,15 @@
 # Docs
 
-Project notes, technical report outline, demo instructions, and design decisions live here.
+Project notes, planning material, technical report inputs, and evaluation artifacts live here.
 
-Suggested contents:
+## Suggested Contents
 
-- architecture overview
-- API contract
-- dataset notes
-- evaluation checklist
-- final report outline
+- PRD and milestone plan
+- dataset notes and preprocessing decisions
+- model tuning and error analysis notes
+- edge evaluation checklist
+- report outline and presentation material
 
+## Current Priority
+
+The main documentation priority is to support an ML-first, edge-focused project narrative rather than a dashboard-first product narrative.
