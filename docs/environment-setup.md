@@ -1,6 +1,6 @@
 # Environment Setup
 
-This project now uses a shared Python environment for both ML and edge work.
+This project now uses a shared Python environment for ML work, edge work, and the minimal FastAPI backend.
 
 ## Recommended Local Setup
 
@@ -34,7 +34,7 @@ make install-dev
 
 `requirements.txt`
 
-- runtime packages for dataset prep, training, inference, plotting, and local logging
+- runtime packages for dataset prep, training, inference, FastAPI logging, plotting, and local logging
 
 `requirements-dev.txt`
 
@@ -52,7 +52,7 @@ make install-dev
 
 - `opencv-python` is used instead of `opencv-python-headless` because the edge track needs webcam support
 - `onnxruntime` is included for optional ONNX inference paths
-- the backend and frontend are not required for the current milestone flow
+- the backend is intentionally minimal and the frontend is out of scope
 
 ## First Tasks After Install
 

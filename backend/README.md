@@ -1,22 +1,23 @@
-# Backend Notes
+# Backend Layer
 
-The backend is no longer a core delivery track for this project revision.
+The backend is part of the current PRD, but only as a minimal logging layer for the edge pipeline.
 
 ## Current Scope
 
-For the revised ML + edge plan, backend work is optional and limited to lightweight support only if the team needs it for local logging or simple result collection.
+The backend team responsibility is intentionally small:
 
-## Not Required for Core Delivery
+- `POST /update` receives occupancy JSON from the edge script
+- `GET /status` returns the latest snapshot
+- optional `GET /history` returns recent logged results for evaluation
+- SQLite stores lightweight result logs only
 
-- no mandatory public API
-- no database requirement
-- no real-time dashboard integration
-- no backend dependency for the final demo
+## Not in Scope
 
-## Future Extension
+- no frontend serving
+- no WebSocket support
+- no complex relational schema
+- no business-heavy analytics layer
 
-If the team later wants a support service, it should stay minimal and local:
+## Design Goal
 
-- accept occupancy results from the edge script
-- store simple evaluation logs
-- avoid becoming a required dependency for Week 7 or Week 8 deliverables
+Keep the service tiny, demo-safe, and easy to remove if the team decides local file logging is enough for the final presentation.
