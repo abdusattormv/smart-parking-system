@@ -92,6 +92,23 @@ The edge team consumes those artifacts and produces:
 - Week 7 - model comparison table, per-weather results, FPS and latency tables, bandwidth analysis
 - Week 8 - final report and demo centered on ML gains and edge reliability
 
+## Week 4 Run Flow
+
+Use the Week 4 demo package for the current class milestone:
+
+```bash
+source .venv/bin/activate
+uvicorn backend.main:app --reload
+```
+
+Then run:
+
+```bash
+python edge/detect.py --image /absolute/path/to/parking-image.jpg --post
+```
+
+More details live in [docs/week4-demo.md](/Users/thebkht/Projects/smart-parking-system/docs/week4-demo.md).
+
 ## Acceptance Criteria
 
 - the model comparison table is complete for the trained variants

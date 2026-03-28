@@ -16,6 +16,17 @@ The edge track is responsible for running the parking model locally, converting 
 - output per-spot occupied/free predictions
 - log timestamps, statuses, confidences, FPS, and latency in local JSON or CSV files
 
+## Week 4 Deliverable
+
+Week 4 only requires a stable static-image demo. The first implementation should:
+
+- run pretrained YOLO on one parking image
+- print detections in the terminal
+- emit the agreed JSON contract shape
+- optionally POST that payload to the mock FastAPI backend
+
+ROI-based occupancy and temporal smoothing are intentionally deferred to Week 5.
+
 ## Ownership Split
 
 - Edge Engineer 1 - capture/inference runner, model loading, device handling, FPS and latency measurement
