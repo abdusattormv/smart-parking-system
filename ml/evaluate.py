@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Evaluate a trained YOLOv8 model on the PKLot test set.
+"""Evaluate a trained YOLOv8 model on parking spot data.
 
 Modes:
-  --full          Full test-set evaluation (mAP, precision, recall, F1)
-  --per-weather   Separate evaluation for sunny / cloudy / rainy splits
-  --sweep         Confidence and IoU NMS threshold sweep (finds best F1)
-  --compare       Evaluate multiple model checkpoints and print comparison table
+  --full            Full test-set evaluation (mAP, precision, recall, F1)
+  --per-weather     Separate evaluation for sunny / cloudy / rainy splits
+  --sweep           Confidence and IoU NMS threshold sweep (finds best F1)
+  --compare         Evaluate multiple model checkpoints and print comparison table
+  --cross-dataset   Cross-dataset evaluation (train PKLot → test CNRPark, or vice versa)
 
 Output: logs/evaluation_results.csv
 
@@ -13,10 +14,12 @@ Usage:
   python ml/evaluate.py --weights artifacts/models/best.pt --full
   python ml/evaluate.py --weights artifacts/models/best.pt --per-weather
   python ml/evaluate.py --weights artifacts/models/best.pt --sweep
-  python ml/evaluate.py --compare \
-      runs/parking/yolov8n_pklot/weights/best.pt \
-      runs/parking/yolov8s_pklot/weights/best.pt \
-      runs/parking/yolov8m_pklot/weights/best.pt
+  python ml/evaluate.py --weights runs/stage2_cls/yolov8n_stage2/weights/best.pt \\
+      --cross-dataset cnrpark_test
+  python ml/evaluate.py --compare \\
+      runs/stage2_cls/yolov8n_stage2/weights/best.pt \\
+      runs/stage2_cls/yolov8s_stage2/weights/best.pt \\
+      runs/stage2_cls/yolov8m_stage2/weights/best.pt
 """
 
 import argparse
@@ -49,6 +52,15 @@ def parse_args() -> argparse.Namespace:
         nargs="+",
         metavar="WEIGHTS",
         help="Compare multiple checkpoints.",
+    )
+    modes.add_argument(
+        "--cross-dataset",
+        metavar="TEST_DIR",
+        help=(
+            "Cross-dataset evaluation: run classifier on TEST_DIR "
+            "(e.g. cnrpark_test or pklot_test). "
+            "TEST_DIR must have occupied/ and free/ subdirs."
+        ),
     )
     return p.parse_args()
 
@@ -205,6 +217,45 @@ def eval_compare(args: argparse.Namespace) -> None:
     append_csv(rows, Path(args.log_dir), "model_comparison.csv")
 
 
+def eval_cross_dataset(args: argparse.Namespace) -> None:
+    """Evaluate a classification model on a separate dataset directory.
+
+    TEST_DIR must contain occupied/ and free/ subdirectories (no YAML needed —
+    Ultralytics classify val accepts a bare directory path).
+    """
+    test_dir = Path(args.cross_dataset)
+    if not test_dir.exists():
+        raise SystemExit(f"Cross-dataset test directory not found: {test_dir}")
+
+    model = YOLO(args.weights)
+    model_name = Path(args.weights).parent.parent.name
+    print(f"Cross-dataset eval: {model_name} on {test_dir} ...")
+
+    metrics = model.val(
+        data=str(test_dir),
+        split="test",
+        device=args.device,
+        imgsz=args.imgsz,
+        verbose=False,
+    )
+    rd   = metrics.results_dict
+    top1 = rd.get("metrics/accuracy_top1", rd.get("val/acc_top1", 0.0))
+    top5 = rd.get("metrics/accuracy_top5", rd.get("val/acc_top5", 0.0))
+
+    row = {
+        "model":     model_name,
+        "eval_type": "cross_dataset",
+        "test_dir":  str(test_dir),
+        "top1":      round(float(top1), 4) if top1 is not None else None,
+        "top5":      round(float(top5), 4) if top5 is not None else None,
+    }
+    print_table([row], f"Cross-Dataset Result ({test_dir.name})")
+    append_csv([row], Path(args.log_dir), "evaluation_results.csv")
+
+    if top1 is not None:
+        print(f"\nTop-1 accuracy on {test_dir.name}: {top1:.3f}")
+
+
 def main() -> None:
     args = parse_args()
 
@@ -219,7 +270,9 @@ def main() -> None:
     if not weights.exists():
         raise SystemExit(f"Checkpoint not found: {weights}")
 
-    if args.per_weather:
+    if args.cross_dataset:
+        eval_cross_dataset(args)
+    elif args.per_weather:
         eval_per_weather(args)
     elif args.sweep:
         eval_sweep(args)

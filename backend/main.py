@@ -1,80 +1,63 @@
-import json
-import sqlite3
-from contextlib import asynccontextmanager
-from datetime import datetime, timezone
-from typing import Any, Dict, List
-
 from fastapi import FastAPI
-from pydantic import BaseModel, ConfigDict
+from datetime import datetime
+import sqlite3
+import json
+
+app = FastAPI()
+DB = "parking.db"
 
 
-DB_PATH = "parking.db"
-_conn: sqlite3.Connection = None  # replaced in tests via monkeypatch
-
-
-def init_db(conn: sqlite3.Connection) -> None:
-    conn.execute(
+def init_db() -> None:
+    con = sqlite3.connect(DB)
+    con.execute(
         """
-        CREATE TABLE IF NOT EXISTS updates (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            received_at TEXT NOT NULL,
-            payload     TEXT NOT NULL
+        CREATE TABLE IF NOT EXISTS log (
+            id       INTEGER PRIMARY KEY AUTOINCREMENT,
+            payload  TEXT,
+            recorded TEXT
         )
         """
     )
-    conn.commit()
+    con.commit()
+    con.close()
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    global _conn
-    _conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-    init_db(_conn)
-    yield
-
-
-app = FastAPI(title="Smart Parking System Backend", lifespan=lifespan)
-
-
-class SpotUpdate(BaseModel):
-    model_config = ConfigDict(extra="allow")
-
-
-@app.get("/health")
-def health() -> Dict[str, str]:
-    return {"status": "ok"}
+init_db()
 
 
 @app.post("/update")
-def update(payload: SpotUpdate) -> Dict[str, Any]:
-    data = payload.model_dump()
-    received_at = datetime.now(timezone.utc).isoformat()
-    _conn.execute(
-        "INSERT INTO updates (received_at, payload) VALUES (?, ?)",
-        (received_at, json.dumps(data)),
+async def update(payload: dict) -> dict:
+    con = sqlite3.connect(DB)
+    con.execute(
+        "INSERT INTO log (payload, recorded) VALUES (?, ?)",
+        (json.dumps(payload), datetime.utcnow().isoformat()),
     )
-    _conn.commit()
-    return {
-        "status": "ok",
-        "received_keys": sorted(data.keys()),
-        "received_at": received_at,
-    }
+    con.commit()
+    con.close()
+    return {"status": "ok"}
 
 
 @app.get("/status")
-def status() -> Dict[str, Any]:
-    row = _conn.execute(
-        "SELECT payload, received_at FROM updates ORDER BY id DESC LIMIT 1"
+async def status() -> dict:
+    con = sqlite3.connect(DB)
+    row = con.execute(
+        "SELECT payload FROM log ORDER BY id DESC LIMIT 1"
     ).fetchone()
-    if row is None:
-        return {"status": "no data"}
-    return {**json.loads(row[0]), "received_at": row[1]}
+    con.close()
+    return json.loads(row[0]) if row else {}
 
 
 @app.get("/history")
-def history(limit: int = 100) -> List[Dict[str, Any]]:
-    rows = _conn.execute(
-        "SELECT payload, received_at FROM updates ORDER BY id ASC LIMIT ?",
+async def history(limit: int = 100) -> list:
+    con = sqlite3.connect(DB)
+    rows = con.execute(
+        "SELECT payload, recorded FROM log ORDER BY id DESC LIMIT ?",
         (limit,),
     ).fetchall()
-    return [{**json.loads(row[0]), "received_at": row[1]} for row in rows]
+    con.close()
+    return [{"data": json.loads(r[0]), "time": r[1]} for r in rows]
+
+
+@app.get("/health")
+async def health() -> dict:
+    return {"status": "ok"}

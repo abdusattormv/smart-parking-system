@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Camera-based smart parking prototype comparing YOLOv8n/s/m on the PKLot dataset, evaluating INT8 quantization for edge deployment, with a minimal FastAPI backend for logging. There is no frontend — the focus is ML quality and edge inference reliability.
+Two-stage edge inference system for smart parking. Stage 1 locates spots via fixed ROI polygons (or a YOLO detector). Stage 2 classifies each cropped patch as occupied/free using YOLOv8-cls trained on PKLot + CNRPark-EXT. Only a JSON result (~1 KB) is sent to a minimal FastAPI backend — no raw video leaves the device.
 
 ## Environment
 
@@ -27,24 +27,35 @@ python -c "import cv2, ultralytics, yaml; print('env ok')"
 uvicorn backend.main:app --reload
 ```
 
-**Run static-image inference demo:**
+**Run static-image inference demo (two-stage pipeline):**
 ```bash
 python edge/detect.py --image /path/to/parking.jpg
-python edge/detect.py --image /path/to/parking.jpg --post              # also POST to backend
+python edge/detect.py --image /path/to/parking.jpg --post                              # POST to backend
 python edge/detect.py --image /path/to/parking.jpg --save-annotated logs/out.jpg
-python edge/detect.py --image /path/to/parking.jpg --device cpu        # if MPS unavailable
-python edge/detect.py --image /path/to/parking.jpg --pklot-model       # use PKLot-trained model
+python edge/detect.py --image /path/to/parking.jpg --device cpu                        # if MPS unavailable
+python edge/detect.py --image /path/to/parking.jpg --stage2-model stage2_cls/weights/best.pt
+python edge/detect.py --image /path/to/parking.jpg --no-fixed-roi                      # use Stage 1 YOLO detector
+python edge/detect.py --camera 0                                                        # live camera mode
 ```
 
-**ML pipeline:**
+**ML pipeline (Stage 2 — PKLot + CNRPark-EXT classifier):**
 ```bash
-python ml/prepare_dataset.py --pklot-dir datasets/pklot_raw   # convert + split PKLot
-python ml/train.py --variant n                                 # train YOLOv8n
-python ml/export.py --weights runs/parking/yolov8n_pklot/weights/best.pt
-python ml/evaluate.py --weights artifacts/models/best.pt --full
-python ml/evaluate.py --weights artifacts/models/best.pt --per-weather
-python ml/evaluate.py --compare runs/parking/*/weights/best.pt
+python ml/prepare_dataset.py --pklot-dir datasets/pklot_patches                        # build stage2_data/
+python ml/prepare_dataset.py --pklot-dir datasets/pklot_patches --cnrpark-dir datasets/cnrpark
+python ml/train.py --stage2 --variant n                                                 # train YOLOv8n-cls
+python ml/train.py --stage2 --variant s                                                 # train YOLOv8s-cls
+python ml/train.py --stage2 --variant m                                                 # train YOLOv8m-cls
+python ml/export.py --weights runs/stage2_cls/yolov8n_stage2/weights/best.pt
+python ml/evaluate.py --weights runs/stage2_cls/yolov8n_stage2/weights/best.pt --full
+python ml/evaluate.py --weights runs/stage2_cls/yolov8n_stage2/weights/best.pt --cross-dataset cnrpark_test
+python ml/evaluate.py --compare runs/stage2_cls/*/weights/best.pt
 python ml/bandwidth.py
+```
+
+**ML pipeline (clf-data workflow — SVM + YOLO comparison):**
+```bash
+python ml/prepare_dataset.py --clf-dir datasets/clf-data
+python ml/train.py --variant n
 ```
 
 **Lint / format:**
@@ -62,7 +73,11 @@ pytest
 
 Two main components:
 
-**`edge/detect.py`** — inference pipeline. Loads a YOLO model (default `yolov8n.pt`), runs inference on a static image, maps vehicle detections to mock parking spot occupancy (`spot_1..spot_n`), and optionally POSTs a JSON payload to the backend. Car class IDs are `{2, 3, 5, 7}` (COCO). Device defaults to `mps` with CPU as fallback.
+**`edge/detect.py`** — two-stage inference pipeline.
+- Stage 1: `get_spot_boxes()` returns `(x1,y1,x2,y2)` per spot. Default: fixed `FIXED_ROIS` dict. With `--no-fixed-roi`: runs a YOLO spot detector.
+- Stage 2: `classify_patch()` crops each ROI to 64×64 and runs YOLOv8-cls. Default model: `yolov8n-cls.pt` (placeholder; replace with trained `stage2_cls/weights/best.pt`).
+- Output JSON: `{spot_1: "free", confidence: {spot_1: 0.97}, timestamp: "..."}`.
+- Device defaults to `mps` with CPU fallback via `--device cpu`.
 
 **`backend/main.py`** — minimal FastAPI app. Persists every update to `parking.db` (SQLite):
 - `POST /update` — accepts any JSON payload (open schema via `extra="allow"`), stores to DB

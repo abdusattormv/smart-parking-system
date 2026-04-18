@@ -1,37 +1,34 @@
 #!/usr/bin/env python3
-"""Prepare clf-data for both SVM and YOLOv8-cls training.
+"""Prepare parking spot patch datasets for training.
 
-Input structure:
+── clf-data workflow (SVM + YOLOv8-cls on a simple binary dataset) ──────────
+Input:
   clf-data/
-    empty/      *.jpg   (empty parking spots)
-    not_empty/  *.jpg   (occupied parking spots)
+    empty/      *.jpg
+    not_empty/  *.jpg
 
-  OR a zip:  --clf-zip clf-data.zip   (extracted automatically)
-
-Outputs
--------
-1. datasets/clf/           YOLOv8-cls folder layout
-     train/empty/  train/not_empty/
-     val/empty/    val/not_empty/
-     test/empty/   test/not_empty/
-
-2. datasets/clf_svm/       Flat numpy arrays for SVM
-     X_train.npy  y_train.npy
-     X_val.npy    y_val.npy
-     X_test.npy   y_test.npy
-     meta.json    (class names, imgsz, split counts)
-
-3. ml/data.yaml            Ultralytics data config
-
-Both outputs share the same train/val/test split so comparisons are fair.
+Outputs: datasets/clf/  (YOLO-cls layout),  datasets/clf_svm/  (numpy arrays)
 
 Usage:
-  python ml/prepare_dataset.py
-  python ml/prepare_dataset.py --clf-zip clf-data.zip
-  python ml/prepare_dataset.py --clf-dir path/to/clf-data
-  python ml/prepare_dataset.py --svm-imgsz 32   # larger SVM feature maps
-  python ml/prepare_dataset.py --skip-svm        # YOLOv8-cls only
-  python ml/prepare_dataset.py --skip-yolo       # SVM only
+  python ml/prepare_dataset.py --clf-dir path/to/clf-data [--skip-svm]
+
+── stage2 workflow (PKLot + CNRPark-EXT → stage2_data/) ─────────────────────
+Input:
+  --pklot-dir     PKLot patch directory (Empty/ and Occupied/ subdirs anywhere)
+  --cnrpark-dir   CNRPark-EXT patch directory (optional; used for cross-dataset)
+
+Output:
+  stage2_data/
+    train/{occupied,free}/   PKLot train + CNRPark train (if provided)
+    val/{occupied,free}/     PKLot val   + CNRPark val   (if provided)
+    test/{occupied,free}/    PKLot test  + CNRPark test  (if provided)
+  cnrpark_test/{occupied,free}/   CNRPark-EXT test split only (cross-dataset eval)
+  pklot_test/{occupied,free}/     PKLot test split only       (cross-dataset eval)
+
+Usage:
+  python ml/prepare_dataset.py --pklot-dir datasets/pklot_patches
+  python ml/prepare_dataset.py --pklot-dir datasets/pklot_patches \\
+                                --cnrpark-dir datasets/cnrpark
 """
 
 import argparse
@@ -56,8 +53,9 @@ SVM_IMGSZ_DEFAULT = 15   # matches the original Colab notebook (15×15 → 675 f
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Prepare clf-data for SVM + YOLOv8-cls training."
+        description="Prepare parking spot patches for SVM + YOLOv8-cls training."
     )
+    # ── clf-data workflow ────────────────────────────────────────────────────
     p.add_argument("--clf-dir", default="datasets/clf-data",
                    help="Root dir with empty/ and not_empty/ sub-folders.")
     p.add_argument("--clf-zip", default=None,
@@ -66,16 +64,24 @@ def parse_args() -> argparse.Namespace:
                    help="Output root for YOLOv8-cls dataset.")
     p.add_argument("--svm-output-dir", default="datasets/clf_svm",
                    help="Output root for SVM numpy arrays.")
+    p.add_argument("--svm-imgsz",  type=int, default=SVM_IMGSZ_DEFAULT,
+                   help=f"Resize NxN for SVM features (default {SVM_IMGSZ_DEFAULT}).")
+    p.add_argument("--data-yaml", default="ml/data.yaml")
+    p.add_argument("--skip-yolo", action="store_true",
+                   help="Skip YOLOv8-cls folder preparation.")
+    p.add_argument("--skip-svm",  action="store_true",
+                   help="Skip SVM numpy array preparation.")
+    # ── stage2 workflow ──────────────────────────────────────────────────────
+    p.add_argument("--pklot-dir", default=None,
+                   help="PKLot patch root (contains Empty/ and Occupied/ dirs).")
+    p.add_argument("--cnrpark-dir", default=None,
+                   help="CNRPark-EXT patch root (optional; for cross-dataset eval).")
+    p.add_argument("--stage2-output", default="stage2_data",
+                   help="Output root for combined stage2 dataset.")
+    # ── shared ───────────────────────────────────────────────────────────────
     p.add_argument("--val-ratio",  type=float, default=0.15)
     p.add_argument("--test-ratio", type=float, default=0.15)
     p.add_argument("--seed",       type=int,   default=42)
-    p.add_argument("--svm-imgsz",  type=int,   default=SVM_IMGSZ_DEFAULT,
-                   help=f"Resize NxN for SVM features (default {SVM_IMGSZ_DEFAULT}).")
-    p.add_argument("--data-yaml",  default="ml/data.yaml")
-    p.add_argument("--skip-yolo",  action="store_true",
-                   help="Skip YOLOv8-cls folder preparation.")
-    p.add_argument("--skip-svm",   action="store_true",
-                   help="Skip SVM numpy array preparation.")
     return p.parse_args()
 
 
@@ -221,11 +227,145 @@ def prepare_svm(
 
 
 # ---------------------------------------------------------------------------
+# Stage 2 — PKLot + CNRPark-EXT combined dataset
+# ---------------------------------------------------------------------------
+
+# Folder names that indicate free / occupied spots (matched case-insensitively)
+_FREE_DIRS = {"empty", "free", "0"}
+_OCC_DIRS  = {"occupied", "not_empty", "1"}
+
+
+def collect_stage2_images(root: Path) -> dict[str, list[Path]]:
+    """Walk root recursively and classify images by their immediate parent folder."""
+    result: dict[str, list[Path]] = {"occupied": [], "free": []}
+    exts = {".jpg", ".jpeg", ".png"}
+    for p in sorted(root.rglob("*")):
+        if not p.is_file() or p.suffix.lower() not in exts:
+            continue
+        parent = p.parent.name.lower()
+        if parent in _FREE_DIRS:
+            result["free"].append(p)
+        elif parent in _OCC_DIRS:
+            result["occupied"].append(p)
+    return result
+
+
+def copy_images(
+    splits: dict[str, dict[str, list[Path]]],
+    dest_root: Path,
+) -> None:
+    """Copy split images to dest_root/{split}/{class}/."""
+    for split_name, cls_paths in splits.items():
+        for cls, paths in cls_paths.items():
+            dest = dest_root / split_name / cls
+            dest.mkdir(parents=True, exist_ok=True)
+            for src in paths:
+                target = dest / src.name
+                # Avoid collisions: prepend a short hash of the source path
+                if target.exists():
+                    h = format(hash(str(src)) & 0xFFFFFF, "06x")
+                    target = dest / f"{h}_{src.name}"
+                shutil.copy2(src, target)
+
+
+def prepare_stage2(args: argparse.Namespace) -> None:
+    pklot_dir  = Path(args.pklot_dir)
+    out_dir    = Path(args.stage2_output)
+
+    if not pklot_dir.exists():
+        raise SystemExit(f"PKLot directory not found: {pklot_dir}")
+
+    print(f"\n[Stage 2] Collecting PKLot patches from {pklot_dir} ...")
+    pklot_images = collect_stage2_images(pklot_dir)
+    for cls, imgs in pklot_images.items():
+        print(f"  PKLot {cls}: {len(imgs)}")
+    if not any(pklot_images.values()):
+        raise SystemExit(
+            "No images found. Ensure PKLot has Empty/ and Occupied/ subdirectories."
+        )
+
+    pklot_splits = stratified_split(
+        pklot_images,
+        val_ratio=args.val_ratio,
+        test_ratio=args.test_ratio,
+        seed=args.seed,
+    )
+
+    cnrpark_splits: dict[str, dict[str, list[Path]]] = {
+        "train": {}, "val": {}, "test": {}
+    }
+    if args.cnrpark_dir:
+        cnrpark_dir = Path(args.cnrpark_dir)
+        if not cnrpark_dir.exists():
+            raise SystemExit(f"CNRPark directory not found: {cnrpark_dir}")
+        print(f"\n[Stage 2] Collecting CNRPark-EXT patches from {cnrpark_dir} ...")
+        cnr_images = collect_stage2_images(cnrpark_dir)
+        for cls, imgs in cnr_images.items():
+            print(f"  CNRPark {cls}: {len(imgs)}")
+        cnrpark_splits = stratified_split(
+            cnr_images,
+            val_ratio=args.val_ratio,
+            test_ratio=args.test_ratio,
+            seed=args.seed,
+        )
+
+    # Combined stage2_data: merge PKLot + CNRPark for each split
+    combined: dict[str, dict[str, list[Path]]] = {}
+    for split in ("train", "val", "test"):
+        combined[split] = {}
+        for cls in ("occupied", "free"):
+            combined[split][cls] = (
+                pklot_splits[split].get(cls, [])
+                + cnrpark_splits[split].get(cls, [])
+            )
+
+    print(f"\n[Stage 2] Writing combined dataset to {out_dir}/ ...")
+    copy_images(combined, out_dir)
+
+    # Separate cross-dataset test sets
+    pklot_test_dir  = Path("pklot_test")
+    cnrpark_test_dir = Path("cnrpark_test")
+
+    print(f"[Stage 2] Writing PKLot test split to {pklot_test_dir}/ ...")
+    copy_images(
+        {"test": pklot_splits["test"]},
+        pklot_test_dir,
+    )
+
+    if args.cnrpark_dir:
+        print(f"[Stage 2] Writing CNRPark test split to {cnrpark_test_dir}/ ...")
+        copy_images(
+            {"test": cnrpark_splits["test"]},
+            cnrpark_test_dir,
+        )
+
+    print("\n── Stage 2 split summary ──────────────────────")
+    for split_name, cls_paths in combined.items():
+        counts = {cls: len(p) for cls, p in cls_paths.items()}
+        total  = sum(counts.values())
+        detail = "  ".join(f"{c}={n}" for c, n in counts.items())
+        print(f"  {split_name:5s}: {total:6d}  ({detail})")
+    pklot_test_n = sum(len(v) for v in pklot_splits["test"].values())
+    print(f"  pklot_test : {pklot_test_n:6d}  (cross-dataset eval)")
+    if args.cnrpark_dir:
+        cnr_test_n = sum(len(v) for v in cnrpark_splits["test"].values())
+        print(f"  cnrpark_test: {cnr_test_n:6d}  (cross-dataset eval)")
+    print()
+
+
+# ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    args       = parse_args()
+    args = parse_args()
+
+    # ── Stage 2 workflow ─────────────────────────────────────────────────────
+    if args.pklot_dir:
+        prepare_stage2(args)
+        return
+
+    # ── clf-data workflow ────────────────────────────────────────────────────
     clf_dir    = Path(args.clf_dir)
     output_dir = Path(args.output_dir)
     svm_dir    = Path(args.svm_output_dir)
@@ -236,7 +376,8 @@ def main() -> None:
     if not clf_dir.exists():
         raise SystemExit(
             f"clf-data directory not found: {clf_dir}\n"
-            "Use --clf-zip clf-data.zip, or set --clf-dir to the correct path."
+            "Use --clf-zip clf-data.zip, or set --clf-dir to the correct path.\n"
+            "For the Stage 2 pipeline use --pklot-dir instead."
         )
 
     print(f"Reading images from {clf_dir} ...")

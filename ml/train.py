@@ -21,15 +21,18 @@ from pathlib import Path
 import ultralytics
 from ultralytics import YOLO
 
-DEFAULT_DATA_YAML = "ml/data.yaml"
-DEFAULT_EPOCHS    = 50
-DEFAULT_IMGSZ     = 64      # clf-data crops are small; 64 px >> 15 px used by SVM
-DEFAULT_BATCH     = 64      # classification is lighter than detection
-DEFAULT_LR        = 0.001
-DEFAULT_PATIENCE  = 10
-PROJECT_DIR       = "runs/parking_clf"
-MODEL_DIR         = "models"
-MIN_ULTRALYTICS   = (8, 4, 38)
+DEFAULT_DATA_YAML       = "ml/data.yaml"
+DEFAULT_STAGE2_DATA_DIR = "stage2_data"
+DEFAULT_EPOCHS          = 50
+STAGE2_EPOCHS           = 20   # classification is fast; PRD §5 spec
+DEFAULT_IMGSZ           = 64
+DEFAULT_BATCH           = 64
+DEFAULT_LR              = 0.001
+DEFAULT_PATIENCE        = 10
+PROJECT_DIR             = "runs/parking_clf"
+STAGE2_PROJECT_DIR      = "runs/stage2_cls"
+MODEL_DIR               = "models"
+MIN_ULTRALYTICS         = (8, 4, 38)
 
 
 def _check_version() -> None:
@@ -67,14 +70,17 @@ def _train_with_fallback(model: YOLO, kwargs: dict, args: argparse.Namespace):
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Train YOLOv8-cls on clf-data (empty / not_empty)."
+        description="Train YOLOv8-cls on parking spot patches."
     )
     p.add_argument("--variant",  choices=["n", "s", "m"], default="n",
                    help="Model size: n (nano), s (small), m (medium).")
-    p.add_argument("--data",     default=DEFAULT_DATA_YAML)
-    p.add_argument("--epochs",   type=int,   default=DEFAULT_EPOCHS)
-    p.add_argument("--imgsz",    type=int,   default=DEFAULT_IMGSZ,
-                   help="Input image size. 64 works well for small spot crops.")
+    p.add_argument("--stage2",   action="store_true",
+                   help="Train Stage 2 classifier on stage2_data/ (PKLot + CNRPark-EXT).")
+    p.add_argument("--data",     default=None,
+                   help="Data YAML (clf workflow) or dir (stage2 workflow). Auto-detected.")
+    p.add_argument("--epochs",   type=int,   default=None,
+                   help="Training epochs. Default: 20 for --stage2, 50 otherwise.")
+    p.add_argument("--imgsz",    type=int,   default=DEFAULT_IMGSZ)
     p.add_argument("--batch",    type=int,   default=DEFAULT_BATCH)
     p.add_argument("--lr",       type=float, default=DEFAULT_LR, dest="lr0")
     p.add_argument("--patience", type=int,   default=DEFAULT_PATIENCE)
@@ -82,57 +88,74 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--resume",   action="store_true")
     p.add_argument("--no-batch-fallback", action="store_true")
     p.add_argument("--model-dir", default=MODEL_DIR,
-                   help="Directory to save yolo_report.json.")
+                   help="Directory to save report JSON.")
     return p.parse_args()
 
 
 def main() -> None:
-    args      = parse_args()
-    data_yaml = Path(args.data)
+    args = parse_args()
 
-    if not data_yaml.exists():
-        raise SystemExit(
-            f"data.yaml not found at {data_yaml}.\n"
-            "Run: python ml/prepare_dataset.py"
-        )
+    # Resolve data path and project settings based on workflow
+    if args.stage2:
+        data_path   = args.data or DEFAULT_STAGE2_DATA_DIR
+        epochs      = args.epochs or STAGE2_EPOCHS
+        project_dir = STAGE2_PROJECT_DIR
+        run_name    = f"yolov8{args.variant}_stage2"
+        report_name = "stage2_report.json"
+
+        if not Path(data_path).exists():
+            raise SystemExit(
+                f"stage2_data not found at {data_path}.\n"
+                "Run: python ml/prepare_dataset.py --pklot-dir datasets/pklot_patches"
+            )
+    else:
+        data_path   = args.data or DEFAULT_DATA_YAML
+        epochs      = args.epochs or DEFAULT_EPOCHS
+        project_dir = PROJECT_DIR
+        run_name    = f"yolov8{args.variant}_clf_parking"
+        report_name = "yolo_report.json"
+
+        if not Path(data_path).exists():
+            raise SystemExit(
+                f"data.yaml not found at {data_path}.\n"
+                "Run: python ml/prepare_dataset.py"
+            )
 
     _check_version()
 
-    weights  = f"yolov8{args.variant}-cls.pt"
-    run_name = f"yolov8{args.variant}_clf_parking"
+    weights = f"yolov8{args.variant}-cls.pt"
 
     print(f"Model  : {weights}  (classification)")
-    print(f"Data   : {data_yaml}")
+    print(f"Data   : {data_path}")
     print(f"Device : {args.device}")
-    print(f"Epochs : {args.epochs}  imgsz={args.imgsz}  batch={args.batch}\n")
+    print(f"Epochs : {epochs}  imgsz={args.imgsz}  batch={args.batch}\n")
 
     model = YOLO(weights)
 
     train_kwargs = dict(
-        data      = str(data_yaml),
-        epochs    = args.epochs,
-        imgsz     = args.imgsz,
-        batch     = args.batch,
-        optimizer = "AdamW",
-        lr0       = args.lr0,
-        patience  = args.patience,
-        device    = args.device,
-        project   = PROJECT_DIR,
-        name      = run_name,
-        resume    = args.resume,
-        verbose   = True,
-        deterministic = False,   # avoids MPS shape-mismatch in some builds
+        data          = str(data_path),
+        epochs        = epochs,
+        imgsz         = args.imgsz,
+        batch         = args.batch,
+        optimizer     = "AdamW",
+        lr0           = args.lr0,
+        patience      = args.patience,
+        device        = args.device,
+        project       = project_dir,
+        name          = run_name,
+        resume        = args.resume,
+        verbose       = True,
+        deterministic = False,
     )
 
     t0      = time.perf_counter()
     results = _train_with_fallback(model, train_kwargs, args)
     elapsed = time.perf_counter() - t0
 
-    best_pt = Path(PROJECT_DIR) / run_name / "weights" / "best.pt"
+    best_pt = Path(project_dir) / run_name / "weights" / "best.pt"
     print(f"\nTraining complete  ({elapsed:.0f}s)")
     print(f"Best checkpoint : {best_pt}")
 
-    # Metrics — key names differ between ultralytics versions
     rd    = results.results_dict
     top1  = rd.get("metrics/accuracy_top1", rd.get("val/acc_top1"))
     top5  = rd.get("metrics/accuracy_top5", rd.get("val/acc_top5"))
@@ -141,13 +164,13 @@ def main() -> None:
     print(f"Top-1 accuracy  : {top1_str}")
     print(f"Top-5 accuracy  : {top5_str}")
 
-    # Save JSON report (consumed by compare.py)
     mdl_dir = Path(args.model_dir)
     mdl_dir.mkdir(parents=True, exist_ok=True)
     report = {
         "model":         f"YOLOv8{args.variant}-cls",
         "weights":       weights,
-        "epochs":        args.epochs,
+        "stage2":        args.stage2,
+        "epochs":        epochs,
         "imgsz":         args.imgsz,
         "batch":         args.batch,
         "train_time_s":  round(elapsed, 2),
@@ -155,7 +178,7 @@ def main() -> None:
         "top1_accuracy": top1,
         "top5_accuracy": top5,
     }
-    report_path = mdl_dir / "yolo_report.json"
+    report_path = mdl_dir / report_name
     with open(report_path, "w") as f:
         json.dump(report, f, indent=2)
     print(f"Report saved → {report_path}")
