@@ -1,0 +1,8 @@
+path: /Users/thebkht/Projects/smart-parking-system/datasets/pklot
+train: images/train
+val: images/val
+test: images/test
+nc: 2
+names:
+- empty
+- occupied

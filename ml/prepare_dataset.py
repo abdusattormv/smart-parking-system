@@ -1,21 +1,33 @@
 #!/usr/bin/env python3
 """Prepare the PKLot dataset for YOLOv8 training.
 
+Supports two input formats:
+
+  Roboflow COCO format (ammarnassanalhajali/pklot-dataset from Kaggle):
+    pklot_raw/
+      train/ _annotations.coco.json  *.jpg
+      valid/ _annotations.coco.json  *.jpg
+      test/  _annotations.coco.json  *.jpg
+
+  Original PKLot XML format:
+    pklot_raw/
+      PUCPR/ Cloudy/ 2012-09-12/ *.jpg  *.xml
+      UFPR04/ ...
+      UFPR05/ ...
+
 Steps:
-  1. Walk the PKLot directory tree (lot / weather / date / images+xmls).
-  2. Parse each XML and convert rotated-rect annotations to YOLO axis-aligned
-     bounding boxes (class 0 = empty, class 1 = occupied).
-  3. Apply a stratified 70/15/15 split across (lot, weather) groups.
-  4. Write images and labels into datasets/pklot/{images,labels}/{train,val,test}.
-  5. Create per-weather symlink splits under datasets/pklot/test_{sunny,cloudy,rainy}.
-  6. Write ml/data.yaml.
+  1. Detect format and parse annotations.
+  2. Convert to YOLO txt (class 0=empty, class 1=occupied, normalized xywh).
+  3. Write to datasets/pklot/{images,labels}/{train,val,test}.
+  4. Write ml/data.yaml.
 
 Usage:
-  python ml/prepare_dataset.py --pklot-dir /path/to/PKLot --output-dir datasets/pklot
+  python ml/prepare_dataset.py --pklot-dir datasets/pklot_raw --output-dir datasets/pklot
   python ml/prepare_dataset.py --help
 """
 
 import argparse
+import json
 import math
 import os
 import shutil
@@ -25,7 +37,7 @@ from pathlib import Path
 import yaml
 from sklearn.model_selection import train_test_split
 
-# PKLot class mapping
+# PKLot class mapping (YOLO output)
 CLASS_EMPTY = 0
 CLASS_OCCUPIED = 1
 
@@ -33,6 +45,12 @@ WEATHER_MAP = {
     "Sunny": "sunny",
     "Cloudy": "cloudy",
     "Rainy": "rainy",
+}
+
+# Roboflow COCO category_id → YOLO class
+COCO_CATEGORY_MAP = {
+    1: CLASS_EMPTY,     # space-empty
+    2: CLASS_OCCUPIED,  # space-occupied
 }
 
 
@@ -124,8 +142,74 @@ def xml_to_yolo(xml_path: Path, img_w: int, img_h: int) -> list[str]:
     return lines
 
 
+def is_roboflow_format(pklot_dir: Path) -> bool:
+    """Return True if this looks like the Roboflow COCO export (train/valid/test + json)."""
+    return (pklot_dir / "train" / "_annotations.coco.json").exists()
+
+
+def convert_roboflow_split(
+    src_dir: Path,
+    split_name: str,
+    output_dir: Path,
+) -> int:
+    """Convert one Roboflow COCO split to YOLO format. Returns image count."""
+    coco_path = src_dir / "_annotations.coco.json"
+    with open(coco_path) as f:
+        coco = json.load(f)
+
+    img_dir = output_dir / "images" / split_name
+    lbl_dir = output_dir / "labels" / split_name
+    img_dir.mkdir(parents=True, exist_ok=True)
+    lbl_dir.mkdir(parents=True, exist_ok=True)
+
+    # Build image id → metadata map
+    id_to_img = {img["id"]: img for img in coco["images"]}
+
+    # Group annotations by image_id
+    ann_by_image: dict[int, list] = {}
+    for ann in coco["annotations"]:
+        cls = COCO_CATEGORY_MAP.get(ann["category_id"])
+        if cls is None:
+            continue
+        ann_by_image.setdefault(ann["image_id"], []).append((cls, ann["bbox"]))
+
+    count = 0
+    for img_meta in coco["images"]:
+        img_id = img_meta["id"]
+        fname = img_meta["file_name"]
+        w = img_meta["width"]
+        h = img_meta["height"]
+
+        src_img = src_dir / fname
+        if not src_img.exists():
+            continue
+
+        shutil.copy2(src_img, img_dir / fname)
+
+        # COCO bbox: [x_min, y_min, width, height] → YOLO: [cx, cy, nw, nh]
+        lines = []
+        for cls, bbox in ann_by_image.get(img_id, []):
+            x, y, bw, bh = bbox
+            cx = (x + bw / 2) / w
+            cy = (y + bh / 2) / h
+            nw = bw / w
+            nh = bh / h
+            cx = max(0.0, min(1.0, cx))
+            cy = max(0.0, min(1.0, cy))
+            nw = max(0.0, min(1.0, nw))
+            nh = max(0.0, min(1.0, nh))
+            if nw > 0 and nh > 0:
+                lines.append(f"{cls} {cx:.6f} {cy:.6f} {nw:.6f} {nh:.6f}")
+
+        stem = Path(fname).stem
+        (lbl_dir / f"{stem}.txt").write_text("\n".join(lines) + ("\n" if lines else ""))
+        count += 1
+
+    return count
+
+
 def collect_samples(pklot_dir: Path) -> list[dict]:
-    """Walk the PKLot tree and collect (image_path, xml_path, lot, weather) records."""
+    """Walk the original PKLot XML tree and collect sample records."""
     samples = []
     for lot_dir in sorted(pklot_dir.iterdir()):
         if not lot_dir.is_dir():
@@ -154,12 +238,8 @@ def collect_samples(pklot_dir: Path) -> list[dict]:
     return samples
 
 
-def copy_sample(
-    sample: dict,
-    split: str,
-    output_dir: Path,
-) -> None:
-    """Copy image and write YOLO label for one sample into the split directory."""
+def copy_sample(sample: dict, split: str, output_dir: Path) -> None:
+    """Copy image and write YOLO label for one XML-format sample."""
     import cv2
 
     img_path: Path = sample["image"]
@@ -175,10 +255,7 @@ def copy_sample(
     shutil.copy2(img_path, img_out)
 
     frame = cv2.imread(str(img_path))
-    if frame is None:
-        h, w = 720, 1280  # fallback
-    else:
-        h, w = frame.shape[:2]
+    h, w = frame.shape[:2] if frame is not None else (720, 1280)
 
     lines = xml_to_yolo(xml_path, w, h)
     lbl_out.write_text("\n".join(lines) + ("\n" if lines else ""))
@@ -232,52 +309,63 @@ def main() -> None:
         raise SystemExit(
             f"PKLot directory not found: {pklot_dir}\n"
             "Download from Kaggle: ammarnassanalhajali/pklot-dataset\n"
-            "  pip install kaggle\n"
             "  kaggle datasets download -d ammarnassanalhajali/pklot-dataset\n"
-            "  unzip pklot-dataset.zip -d datasets/pklot_raw"
+            "  mkdir -p datasets/pklot_raw && unzip pklot-dataset.zip -d datasets/pklot_raw"
         )
 
-    print(f"Scanning {pklot_dir} ...")
-    samples = collect_samples(pklot_dir)
-    if not samples:
-        raise SystemExit(f"No samples found in {pklot_dir}. Check directory structure.")
+    if is_roboflow_format(pklot_dir):
+        print(f"Detected Roboflow COCO format in {pklot_dir}")
+        # Map Roboflow split names to standard names
+        split_map = {"train": "train", "valid": "val", "test": "test"}
+        totals = {}
+        for src_name, dst_name in split_map.items():
+            src_dir = pklot_dir / src_name
+            if not src_dir.exists():
+                print(f"  Skipping {src_name} (not found)")
+                continue
+            print(f"  Converting {src_name} → {dst_name} ...")
+            count = convert_roboflow_split(src_dir, dst_name, output_dir)
+            totals[dst_name] = count
+            print(f"  {count} images")
+    else:
+        print(f"Detected original PKLot XML format in {pklot_dir}")
+        print(f"Scanning ...")
+        samples = collect_samples(pklot_dir)
+        if not samples:
+            raise SystemExit(
+                f"No samples found in {pklot_dir}.\n"
+                "Expected either:\n"
+                "  Roboflow: train/_annotations.coco.json\n"
+                "  Original: PUCPR/Sunny/date/*.jpg + *.xml"
+            )
+        print(f"Found {len(samples)} samples.")
 
-    print(f"Found {len(samples)} samples across lots/weathers.")
+        groups = [s["group"] for s in samples]
+        train_val, test = train_test_split(
+            samples, test_size=args.test_ratio, stratify=groups, random_state=args.seed
+        )
+        val_ratio_adjusted = args.val_ratio / (1.0 - args.test_ratio)
+        train, val = train_test_split(
+            train_val,
+            test_size=val_ratio_adjusted,
+            stratify=[s["group"] for s in train_val],
+            random_state=args.seed,
+        )
 
-    # Stratified split by (lot, weather) group
-    groups = [s["group"] for s in samples]
-    train_val, test = train_test_split(
-        samples,
-        test_size=args.test_ratio,
-        stratify=groups,
-        random_state=args.seed,
-    )
-    val_ratio_adjusted = args.val_ratio / (1.0 - args.test_ratio)
-    train, val = train_test_split(
-        train_val,
-        test_size=val_ratio_adjusted,
-        stratify=[s["group"] for s in train_val],
-        random_state=args.seed,
-    )
+        for split_name, split_samples in [("train", train), ("val", val), ("test", test)]:
+            print(f"Copying {split_name} ({len(split_samples)} images) ...")
+            for i, sample in enumerate(split_samples):
+                copy_sample(sample, split_name, output_dir)
+                if (i + 1) % 500 == 0:
+                    print(f"  {i + 1}/{len(split_samples)}")
 
-    print(f"Split: train={len(train)}, val={len(val)}, test={len(test)}")
-
-    for split_name, split_samples in [("train", train), ("val", val), ("test", test)]:
-        print(f"Copying {split_name} ({len(split_samples)} images) ...")
-        for i, sample in enumerate(split_samples):
-            copy_sample(sample, split_name, output_dir)
-            if (i + 1) % 500 == 0:
-                print(f"  {i + 1}/{len(split_samples)}")
-
-    print("Creating per-weather test splits ...")
-    make_weather_test_splits(output_dir, test)
+        totals = {"train": len(train), "val": len(val), "test": len(test)}
 
     write_data_yaml(output_dir, Path(args.data_yaml))
 
     print("\nDone.")
-    print(f"  Train: {len(train)} images → {output_dir}/images/train/")
-    print(f"  Val:   {len(val)} images → {output_dir}/images/val/")
-    print(f"  Test:  {len(test)} images → {output_dir}/images/test/")
+    for split, n in totals.items():
+        print(f"  {split:5s}: {n} images → {output_dir}/images/{split}/")
 
 
 if __name__ == "__main__":
