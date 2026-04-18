@@ -32,3 +32,5 @@ logs/
 # Editors
 .idea/
 .vscode/
+
+datasets/
