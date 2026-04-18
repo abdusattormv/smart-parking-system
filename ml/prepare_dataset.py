@@ -13,8 +13,22 @@ Usage:
   python ml/prepare_dataset.py --clf-dir path/to/clf-data [--skip-svm]
 
 ── stage2 workflow (PKLot + CNRPark-EXT → stage2_data/) ─────────────────────
+Supports two PKLot layouts:
+
+  A) Roboflow export (train/valid/test + images/ + labels/ subdirs):
+       PKLot/
+         train/images/*.jpg  train/labels/*.txt
+         valid/images/*.jpg  valid/labels/*.txt
+         test/images/*.jpg   test/labels/*.txt
+
+  B) Legacy patch layout (Empty/ and Occupied/ leaf dirs anywhere):
+       PKLot/
+         PUCPR/Cloudy/2012-09-11/Empty/*.jpg
+         PUCPR/Cloudy/2012-09-11/Occupied/*.jpg
+         ...
+
 Input:
-  --pklot-dir     PKLot patch directory (Empty/ and Occupied/ subdirs anywhere)
+  --pklot-dir     PKLot root directory (either layout auto-detected)
   --cnrpark-dir   CNRPark-EXT patch directory (optional; used for cross-dataset)
 
 Output:
@@ -26,8 +40,8 @@ Output:
   pklot_test/{occupied,free}/     PKLot test split only       (cross-dataset eval)
 
 Usage:
-  python ml/prepare_dataset.py --pklot-dir datasets/pklot_patches
-  python ml/prepare_dataset.py --pklot-dir datasets/pklot_patches \\
+  python ml/prepare_dataset.py --pklot-dir datasets/PKLot
+  python ml/prepare_dataset.py --pklot-dir datasets/PKLot \\
                                 --cnrpark-dir datasets/cnrpark
 """
 
@@ -38,6 +52,7 @@ import zipfile
 from pathlib import Path
 
 import numpy as np
+from PIL import Image
 from skimage.io import imread
 from skimage.transform import resize
 from sklearn.model_selection import train_test_split
@@ -45,6 +60,14 @@ import yaml
 
 CLASSES = ["empty", "not_empty"]
 SVM_IMGSZ_DEFAULT = 15   # matches the original Colab notebook (15×15 → 675 features)
+
+# Folder names that indicate free / occupied spots (matched case-insensitively)
+_FREE_DIRS = {"empty", "free", "0"}
+_OCC_DIRS  = {"occupied", "not_empty", "1"}
+
+# Roboflow PKLot class IDs (verify against _annotations.coco.json if results look wrong)
+_ROBOFLOW_FREE_IDS = {0}   # "empty" in Roboflow PKLot export
+_ROBOFLOW_OCC_IDS  = {1}   # "occupied"
 
 
 # ---------------------------------------------------------------------------
@@ -73,11 +96,14 @@ def parse_args() -> argparse.Namespace:
                    help="Skip SVM numpy array preparation.")
     # ── stage2 workflow ──────────────────────────────────────────────────────
     p.add_argument("--pklot-dir", default=None,
-                   help="PKLot patch root (contains Empty/ and Occupied/ dirs).")
+                   help="PKLot root (Roboflow layout or legacy Empty/Occupied layout).")
     p.add_argument("--cnrpark-dir", default=None,
                    help="CNRPark-EXT patch root (optional; for cross-dataset eval).")
     p.add_argument("--stage2-output", default="stage2_data",
                    help="Output root for combined stage2 dataset.")
+    p.add_argument("--patch-cache", default=None,
+                   help="Where to write cropped Roboflow patches "
+                        "(default: <pklot-dir>/../<name>_patches).")
     # ── shared ───────────────────────────────────────────────────────────────
     p.add_argument("--val-ratio",  type=float, default=0.15)
     p.add_argument("--test-ratio", type=float, default=0.15)
@@ -227,13 +253,8 @@ def prepare_svm(
 
 
 # ---------------------------------------------------------------------------
-# Stage 2 — PKLot + CNRPark-EXT combined dataset
+# Stage 2 — legacy patch layout (Empty/ / Occupied/ leaf dirs)
 # ---------------------------------------------------------------------------
-
-# Folder names that indicate free / occupied spots (matched case-insensitively)
-_FREE_DIRS = {"empty", "free", "0"}
-_OCC_DIRS  = {"occupied", "not_empty", "1"}
-
 
 def collect_stage2_images(root: Path) -> dict[str, list[Path]]:
     """Walk root recursively and classify images by their immediate parent folder."""
@@ -250,9 +271,127 @@ def collect_stage2_images(root: Path) -> dict[str, list[Path]]:
     return result
 
 
+# ---------------------------------------------------------------------------
+# Stage 2 — Roboflow patch layout (train/valid/test + images/ + labels/)
+# ---------------------------------------------------------------------------
+
+def collect_roboflow_pklot(
+    root: Path,
+    patch_output: Path,
+    splits: tuple[str, ...] = ("train", "valid", "test"),
+) -> dict[str, list[Path]]:
+    """
+    Crop individual parking space patches from a Roboflow-format PKLot dataset.
+
+    Root layout:
+        {split}/images/*.jpg
+        {split}/labels/*.txt   (YOLO format: class cx cy w h, normalised)
+
+    Writes cropped patches to:
+        patch_output/{split}/free/*.jpg
+        patch_output/{split}/occupied/*.jpg
+
+    Returns a flat dict {"free": [...], "occupied": [...]} of ALL patch paths,
+    suitable for passing to stratified_split().
+
+    NOTE: class IDs come from _ROBOFLOW_FREE_IDS / _ROBOFLOW_OCC_IDS at the top
+    of this file. If results look wrong (~0% or ~100% accuracy), swap those sets.
+    """
+    result: dict[str, list[Path]] = {"free": [], "occupied": []}
+
+    for split in splits:
+        img_dir   = root / split / "images"
+        label_dir = root / split / "labels"
+
+        # "valid" is Roboflow's name; some exports use "val"
+        if not img_dir.exists() and split == "valid":
+            img_dir   = root / "val" / "images"
+            label_dir = root / "val" / "labels"
+
+        if not img_dir.exists() or not label_dir.exists():
+            print(f"  [warn] skipping missing split: {split}")
+            continue
+
+        free_out = patch_output / split / "free"
+        occ_out  = patch_output / split / "occupied"
+        free_out.mkdir(parents=True, exist_ok=True)
+        occ_out.mkdir(parents=True, exist_ok=True)
+
+        img_files = sorted(img_dir.glob("*.jpg")) + sorted(img_dir.glob("*.png"))
+        n_free = n_occ = 0
+
+        for img_path in img_files:
+            label_path = label_dir / (img_path.stem + ".txt")
+            if not label_path.exists():
+                continue
+
+            img = Image.open(img_path)
+            W, H = img.size
+
+            with open(label_path) as f:
+                lines = [ln.strip() for ln in f if ln.strip()]
+
+            for i, line in enumerate(lines):
+                parts = line.split()
+                if len(parts) < 5:
+                    continue
+                cls_id = int(parts[0])
+                cx, cy, bw, bh = (float(x) for x in parts[1:5])
+
+                # Convert normalised YOLO → pixel coords and clamp
+                x1 = max(0, int((cx - bw / 2) * W))
+                y1 = max(0, int((cy - bh / 2) * H))
+                x2 = min(W, int((cx + bw / 2) * W))
+                y2 = min(H, int((cy + bh / 2) * H))
+                if x2 <= x1 or y2 <= y1:
+                    continue
+
+                patch = img.crop((x1, y1, x2, y2))
+                fname = f"{img_path.stem}__{i:04d}.jpg"
+
+                if cls_id in _ROBOFLOW_FREE_IDS:
+                    patch.save(free_out / fname)
+                    result["free"].append(free_out / fname)
+                    n_free += 1
+                elif cls_id in _ROBOFLOW_OCC_IDS:
+                    patch.save(occ_out / fname)
+                    result["occupied"].append(occ_out / fname)
+                    n_occ += 1
+
+        print(f"  {split}: {n_free} free, {n_occ} occupied patches cropped")
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# copy_images — collision-safe, source-root-aware
+# ---------------------------------------------------------------------------
+
+def _safe_name(src: Path, source_root: Path | None) -> str:
+    """
+    Build a collision-free filename.
+
+    With source_root: prefix with the relative path segments above the class
+    folder, joined by '_'. E.g. PUCPR_Cloudy_2012-09-11__filename.jpg
+    Without source_root: use the bare filename.
+    """
+    if source_root is not None:
+        try:
+            rel = src.relative_to(source_root)
+            # rel.parts = (..., <class>, filename) — drop last two
+            prefix_parts = rel.parts[:-2]
+            if prefix_parts:
+                return "_".join(prefix_parts) + "__" + src.name
+        except ValueError:
+            pass
+    return src.name
+
+
 def copy_images(
     splits: dict[str, dict[str, list[Path]]],
     dest_root: Path,
+    *,
+    source_root: Path | None = None,
 ) -> None:
     """Copy split images to dest_root/{split}/{class}/."""
     for split_name, cls_paths in splits.items():
@@ -260,28 +399,77 @@ def copy_images(
             dest = dest_root / split_name / cls
             dest.mkdir(parents=True, exist_ok=True)
             for src in paths:
-                target = dest / src.name
-                # Avoid collisions: prepend a short hash of the source path
+                safe = _safe_name(src, source_root)
+                target = dest / safe
                 if target.exists():
-                    h = format(hash(str(src)) & 0xFFFFFF, "06x")
-                    target = dest / f"{h}_{src.name}"
+                    h = format(abs(hash(str(src))) & 0xFFFFFF, "06x")
+                    target = dest / f"{h}_{safe}"
                 shutil.copy2(src, target)
 
 
+def _copy_test_flat(
+    test_cls_paths: dict[str, list[Path]],
+    dest_root: Path,
+    source_root: Path | None = None,
+) -> None:
+    """
+    Copy test patches directly to dest_root/{class}/ (no extra 'test/' subdir).
+    This matches the documented pklot_test/{occupied,free}/ layout.
+    """
+    for cls, paths in test_cls_paths.items():
+        dest = dest_root / cls
+        dest.mkdir(parents=True, exist_ok=True)
+        for src in paths:
+            safe = _safe_name(src, source_root)
+            target = dest / safe
+            if target.exists():
+                h = format(abs(hash(str(src))) & 0xFFFFFF, "06x")
+                target = dest / f"{h}_{safe}"
+            shutil.copy2(src, target)
+
+
+# ---------------------------------------------------------------------------
+# Stage 2 — top-level orchestrator
+# ---------------------------------------------------------------------------
+
 def prepare_stage2(args: argparse.Namespace) -> None:
-    pklot_dir  = Path(args.pklot_dir)
-    out_dir    = Path(args.stage2_output)
+    pklot_dir = Path(args.pklot_dir)
+    out_dir   = Path(args.stage2_output)
 
     if not pklot_dir.exists():
         raise SystemExit(f"PKLot directory not found: {pklot_dir}")
 
-    print(f"\n[Stage 2] Collecting PKLot patches from {pklot_dir} ...")
-    pklot_images = collect_stage2_images(pklot_dir)
+    # ── Detect layout ────────────────────────────────────────────────────────
+    is_roboflow = any(
+        (pklot_dir / s / "images").exists()
+        for s in ("train", "valid", "test", "val")
+    )
+
+    if is_roboflow:
+        print(f"\n[Stage 2] Detected Roboflow layout in {pklot_dir}")
+        patch_cache = Path(args.patch_cache) if args.patch_cache else (
+            pklot_dir.parent / (pklot_dir.name + "_patches")
+        )
+        print(f"  Cropping patches → {patch_cache}/ ...")
+        pklot_images = collect_roboflow_pklot(pklot_dir, patch_cache)
+        patch_source_root = patch_cache   # for collision-safe naming
+    else:
+        print(f"\n[Stage 2] Detected legacy patch layout in {pklot_dir}")
+        # Auto-descend Kaggle wrapper dir (e.g. pklot-dataset/PKLot/)
+        _inner = pklot_dir / "PKLot"
+        if _inner.exists():
+            pklot_dir = _inner
+            print(f"  (auto-descended into {pklot_dir})")
+        pklot_images = collect_stage2_images(pklot_dir)
+        patch_source_root = pklot_dir
+
     for cls, imgs in pklot_images.items():
         print(f"  PKLot {cls}: {len(imgs)}")
     if not any(pklot_images.values()):
         raise SystemExit(
-            "No images found. Ensure PKLot has Empty/ and Occupied/ subdirectories."
+            "No images found. Check that the PKLot directory layout is correct.\n"
+            "  Roboflow: train/images/, valid/images/, test/images/\n"
+            "  Legacy:   .../Empty/*.jpg and .../Occupied/*.jpg leaf dirs"
         )
 
     pklot_splits = stratified_split(
@@ -291,9 +479,14 @@ def prepare_stage2(args: argparse.Namespace) -> None:
         seed=args.seed,
     )
 
+    # FIX: initialise with correct keys so merge never KeyErrors
     cnrpark_splits: dict[str, dict[str, list[Path]]] = {
-        "train": {}, "val": {}, "test": {}
+        "train": {"occupied": [], "free": []},
+        "val":   {"occupied": [], "free": []},
+        "test":  {"occupied": [], "free": []},
     }
+    cnr_source_root: Path | None = None
+
     if args.cnrpark_dir:
         cnrpark_dir = Path(args.cnrpark_dir)
         if not cnrpark_dir.exists():
@@ -308,8 +501,9 @@ def prepare_stage2(args: argparse.Namespace) -> None:
             test_ratio=args.test_ratio,
             seed=args.seed,
         )
+        cnr_source_root = cnrpark_dir
 
-    # Combined stage2_data: merge PKLot + CNRPark for each split
+    # ── Merge splits ─────────────────────────────────────────────────────────
     combined: dict[str, dict[str, list[Path]]] = {}
     for split in ("train", "val", "test"):
         combined[split] = {}
@@ -320,25 +514,20 @@ def prepare_stage2(args: argparse.Namespace) -> None:
             )
 
     print(f"\n[Stage 2] Writing combined dataset to {out_dir}/ ...")
-    copy_images(combined, out_dir)
+    copy_images(combined, out_dir, source_root=patch_source_root)
 
-    # Separate cross-dataset test sets
-    pklot_test_dir  = Path("pklot_test")
+    # FIX: write cross-dataset test splits flat (pklot_test/{cls}/, not pklot_test/test/{cls}/)
+    pklot_test_dir   = Path("pklot_test")
     cnrpark_test_dir = Path("cnrpark_test")
 
     print(f"[Stage 2] Writing PKLot test split to {pklot_test_dir}/ ...")
-    copy_images(
-        {"test": pklot_splits["test"]},
-        pklot_test_dir,
-    )
+    _copy_test_flat(pklot_splits["test"], pklot_test_dir, source_root=patch_source_root)
 
     if args.cnrpark_dir:
         print(f"[Stage 2] Writing CNRPark test split to {cnrpark_test_dir}/ ...")
-        copy_images(
-            {"test": cnrpark_splits["test"]},
-            cnrpark_test_dir,
-        )
+        _copy_test_flat(cnrpark_splits["test"], cnrpark_test_dir, source_root=cnr_source_root)
 
+    # ── Summary ──────────────────────────────────────────────────────────────
     print("\n── Stage 2 split summary ──────────────────────")
     for split_name, cls_paths in combined.items():
         counts = {cls: len(p) for cls, p in cls_paths.items()}
