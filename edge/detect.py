@@ -17,7 +17,8 @@ from ultralytics import YOLO
 DEFAULT_MODEL = "yolov8n.pt"
 DEFAULT_BACKEND_URL = "http://127.0.0.1:8000/update"
 DEFAULT_DEMO_SPOTS = 4
-CAR_CLASS_IDS = {2, 3, 5, 7}
+CAR_CLASS_IDS = {2, 3, 5, 7}  # COCO vehicle classes (pretrained mode)
+PKLOT_OCCUPIED_CLASS_ID = 1   # PKLot-trained model: 0=empty, 1=occupied
 
 DEFAULT_CONFIG_PATH = Path(__file__).parent / "config.yaml"
 DEFAULT_SMOOTH_N = 5
@@ -138,6 +139,14 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="YOLO confidence threshold.",
     )
+    parser.add_argument(
+        "--pklot-model",
+        action="store_true",
+        help=(
+            "Use PKLot-trained model mode: class 0=empty, class 1=occupied. "
+            "Spots are classified directly by the model rather than by COCO vehicle overlap."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -253,14 +262,25 @@ def build_roi_payload(
     smooth_buf: SmoothingBuffer,
     fps: float,
     overlap_threshold: float,
+    pklot_mode: bool = False,
 ) -> Dict[str, Any]:
-    """Build the agreed JSON payload using ROI-based spot classification."""
-    car_boxes = [d["bbox"] for d in detections if d["class_id"] in CAR_CLASS_IDS]
+    """Build the agreed JSON payload using ROI-based spot classification.
 
-    raw: Dict[str, bool] = {
-        sid: spot_occupied(car_boxes, roi, threshold=overlap_threshold)
-        for sid, roi in spots.items()
-    }
+    pklot_mode=True: model outputs occupied(1)/empty(0) spot detections directly.
+    pklot_mode=False (default): COCO pretrained model; occupancy inferred from vehicle overlap.
+    """
+    if pklot_mode:
+        occupied_boxes = [d["bbox"] for d in detections if d["class_id"] == PKLOT_OCCUPIED_CLASS_ID]
+        raw: Dict[str, bool] = {
+            sid: spot_occupied(occupied_boxes, roi, threshold=overlap_threshold)
+            for sid, roi in spots.items()
+        }
+    else:
+        car_boxes = [d["bbox"] for d in detections if d["class_id"] in CAR_CLASS_IDS]
+        raw = {
+            sid: spot_occupied(car_boxes, roi, threshold=overlap_threshold)
+            for sid, roi in spots.items()
+        }
     smooth_buf.update(raw)
     smoothed = smooth_buf.get_status()
 
@@ -354,7 +374,8 @@ def run_inference(args: argparse.Namespace) -> int:
             )
 
     payload = build_roi_payload(
-        detections, spots, smooth_buf, fps, args.overlap_threshold
+        detections, spots, smooth_buf, fps, args.overlap_threshold,
+        pklot_mode=args.pklot_model,
     )
 
     print("\nDetections")
@@ -430,11 +451,18 @@ def run_camera(args: argparse.Namespace) -> int:
                         }
                     )
 
-            car_boxes = [d["bbox"] for d in detections if d["class_id"] in CAR_CLASS_IDS]
-            raw: Dict[str, bool] = {
-                sid: spot_occupied(car_boxes, roi, threshold=args.overlap_threshold)
-                for sid, roi in spots.items()
-            }
+            if args.pklot_model:
+                occ_boxes = [d["bbox"] for d in detections if d["class_id"] == PKLOT_OCCUPIED_CLASS_ID]
+                raw: Dict[str, bool] = {
+                    sid: spot_occupied(occ_boxes, roi, threshold=args.overlap_threshold)
+                    for sid, roi in spots.items()
+                }
+            else:
+                car_boxes = [d["bbox"] for d in detections if d["class_id"] in CAR_CLASS_IDS]
+                raw = {
+                    sid: spot_occupied(car_boxes, roi, threshold=args.overlap_threshold)
+                    for sid, roi in spots.items()
+                }
             smooth_buf.update(raw)
 
             now = time.perf_counter()

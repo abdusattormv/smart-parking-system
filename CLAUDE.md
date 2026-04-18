@@ -33,6 +33,18 @@ python edge/detect.py --image /path/to/parking.jpg
 python edge/detect.py --image /path/to/parking.jpg --post              # also POST to backend
 python edge/detect.py --image /path/to/parking.jpg --save-annotated logs/out.jpg
 python edge/detect.py --image /path/to/parking.jpg --device cpu        # if MPS unavailable
+python edge/detect.py --image /path/to/parking.jpg --pklot-model       # use PKLot-trained model
+```
+
+**ML pipeline:**
+```bash
+python ml/prepare_dataset.py --pklot-dir datasets/pklot_raw   # convert + split PKLot
+python ml/train.py --variant n                                 # train YOLOv8n
+python ml/export.py --weights runs/parking/yolov8n_pklot/weights/best.pt
+python ml/evaluate.py --weights artifacts/models/best.pt --full
+python ml/evaluate.py --weights artifacts/models/best.pt --per-weather
+python ml/evaluate.py --compare runs/parking/*/weights/best.pt
+python ml/bandwidth.py
 ```
 
 **Lint / format:**
@@ -52,15 +64,17 @@ Two main components:
 
 **`edge/detect.py`** — inference pipeline. Loads a YOLO model (default `yolov8n.pt`), runs inference on a static image, maps vehicle detections to mock parking spot occupancy (`spot_1..spot_n`), and optionally POSTs a JSON payload to the backend. Car class IDs are `{2, 3, 5, 7}` (COCO). Device defaults to `mps` with CPU as fallback.
 
-**`backend/main.py`** — minimal FastAPI app with two endpoints:
-- `POST /update` — accepts any JSON payload (open schema via `extra="allow"`), echoes keys and timestamp
+**`backend/main.py`** — minimal FastAPI app. Persists every update to `parking.db` (SQLite):
+- `POST /update` — accepts any JSON payload (open schema via `extra="allow"`), stores to DB
+- `GET /status` — returns the latest stored update
+- `GET /history` — returns up to N recent updates (default 100)
 - `GET /health` — liveness check
-
-The backend is intentionally a mock; it does not persist data. Future work adds SQLite logging.
 
 **`edge/config.example.yaml`** — template for local `edge/config.yaml` (gitignored). Covers model path, input mode (image or camera), postprocessing (smoothing window, overlap threshold), and logging output format.
 
-**`artifacts/models/`** — where trained model checkpoints (`best.pt`, `best.onnx`) are placed by the ML team. Not committed.
+**`ml/`** — ML pipeline scripts: `prepare_dataset.py`, `train.py`, `export.py`, `evaluate.py`, `bandwidth.py`.
+
+**`artifacts/models/`** — where trained model checkpoints (`best.pt`, `best.onnx`, `best_int8.onnx`) are placed. Not committed.
 
 **`logs/`** — timestamped CSV/JSON inference logs. Not committed.
 
