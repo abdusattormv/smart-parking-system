@@ -10,6 +10,7 @@ Usage:
   python ml/train.py --variant m --device cpu    # on CPU / Colab
   python ml/train.py --variant n --epochs 10     # quick smoke test
   python ml/train.py --device cuda               # NVIDIA GPU
+  python ml/train.py --stage2 --device cuda      # Stage 2 on PKLot + CNRPark-EXT
 """
 
 import argparse
@@ -18,6 +19,7 @@ import sys
 import time
 from pathlib import Path
 
+import yaml
 import ultralytics
 from ultralytics import YOLO
 
@@ -77,7 +79,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--stage2",   action="store_true",
                    help="Train Stage 2 classifier on stage2_data/ (PKLot + CNRPark-EXT).")
     p.add_argument("--data",     default=None,
-                   help="Data YAML (clf workflow) or dir (stage2 workflow). Auto-detected.")
+                   help="Dataset directory. Auto-detected from data.yaml if not set.")
     p.add_argument("--epochs",   type=int,   default=None,
                    help="Training epochs. Default: 20 for --stage2, 50 otherwise.")
     p.add_argument("--imgsz",    type=int,   default=DEFAULT_IMGSZ)
@@ -92,36 +94,65 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
+def _resolve_clf_data(args: argparse.Namespace) -> str:
+    """
+    Newer Ultralytics classification trainer requires a dataset *directory*,
+    not a YAML file. Resolve the correct path:
+      1. If --data was passed explicitly, use it directly.
+      2. Otherwise read ml/data.yaml and return its 'path' value.
+    """
+    if args.data:
+        p = Path(args.data)
+        if not p.exists():
+            raise SystemExit(f"Data path not found: {p}")
+        return str(p)
+
+    yaml_path = Path(DEFAULT_DATA_YAML)
+    if not yaml_path.exists():
+        raise SystemExit(
+            f"data.yaml not found at {yaml_path}.\n"
+            "Run: python ml/prepare_dataset.py"
+        )
+    with open(yaml_path) as f:
+        cfg = yaml.safe_load(f)
+
+    data_dir = Path(cfg.get("path", "datasets/clf"))
+    if not data_dir.exists():
+        raise SystemExit(
+            f"Dataset directory '{data_dir}' (from {yaml_path}) not found.\n"
+            "Run: python ml/prepare_dataset.py"
+        )
+    return str(data_dir)
+
+
+def _resolve_stage2_data(args: argparse.Namespace) -> str:
+    data_path = Path(args.data or DEFAULT_STAGE2_DATA_DIR)
+    if not data_path.exists():
+        raise SystemExit(
+            f"stage2_data not found at {data_path}.\n"
+            "Run: python ml/prepare_dataset.py --pklot-dir datasets/pklot_raw"
+        )
+    return str(data_path)
+
+
 def main() -> None:
     args = parse_args()
 
-    # Resolve data path and project settings based on workflow
+    _check_version()
+
+    # ── Resolve workflow-specific settings ───────────────────────────────────
     if args.stage2:
-        data_path   = args.data or DEFAULT_STAGE2_DATA_DIR
+        data_path   = _resolve_stage2_data(args)
         epochs      = args.epochs or STAGE2_EPOCHS
         project_dir = STAGE2_PROJECT_DIR
         run_name    = f"yolov8{args.variant}_stage2"
         report_name = "stage2_report.json"
-
-        if not Path(data_path).exists():
-            raise SystemExit(
-                f"stage2_data not found at {data_path}.\n"
-                "Run: python ml/prepare_dataset.py --pklot-dir datasets/pklot_patches"
-            )
     else:
-        data_path   = args.data or DEFAULT_DATA_YAML
+        data_path   = _resolve_clf_data(args)
         epochs      = args.epochs or DEFAULT_EPOCHS
         project_dir = PROJECT_DIR
         run_name    = f"yolov8{args.variant}_clf_parking"
         report_name = "yolo_report.json"
-
-        if not Path(data_path).exists():
-            raise SystemExit(
-                f"data.yaml not found at {data_path}.\n"
-                "Run: python ml/prepare_dataset.py"
-            )
-
-    _check_version()
 
     weights = f"yolov8{args.variant}-cls.pt"
 
@@ -133,7 +164,7 @@ def main() -> None:
     model = YOLO(weights)
 
     train_kwargs = dict(
-        data          = str(data_path),
+        data          = data_path,
         epochs        = epochs,
         imgsz         = args.imgsz,
         batch         = args.batch,
