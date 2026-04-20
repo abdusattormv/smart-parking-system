@@ -6,5 +6,6 @@ This mirror exists only as a friendly filename for sharing. It should not diverg
 
 - fixed ROIs are the default Stage 1 path
 - Stage 2 patch classification is the main ML accuracy target
+- single-model occupancy detection is an ML-only comparison baseline
 - the runtime contract is `spots` + `confidence` + UTC `timestamp`
 - backend persistence stores the edge payload as-is

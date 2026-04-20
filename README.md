@@ -4,7 +4,7 @@ This repo implements the v3 smart parking pipeline:
 
 `static camera -> fixed ROIs -> per-spot crop -> YOLOv8*-cls -> temporal smoothing -> JSON -> FastAPI`
 
-Fixed ROIs are the default Stage 1 path because the target demo camera is static. An optional YOLO Stage 1 detector remains available for experiments, but Stage 2 patch classification is the main ML accuracy track.
+Fixed ROIs are the default Stage 1 path because the target demo camera is static. An optional YOLO Stage 1 detector remains available for experiments, Stage 2 patch classification is the main ML accuracy track, and a single-model full-frame occupancy detector is available as an ML-only comparison baseline.
 
 ## Repo Focus
 
@@ -43,7 +43,24 @@ python -m pip install --upgrade pip
 pip install -r requirements-dev.txt
 ```
 
-## Stage 2 Workflow
+## ML Workflows
+
+Separate Stage 1 detector dataset:
+
+```bash
+python ml/prepare_dataset.py --stage1 --pklot-dir /path/to/pklot_roboflow
+python ml/train.py --stage1 --variant n --device mps
+```
+
+Single-model occupancy detector baseline:
+
+```bash
+python ml/prepare_dataset.py --single-model --pklot-dir /path/to/pklot_roboflow
+python ml/train.py --single-model --variant n --device mps
+python ml/evaluate.py --single-model --weights runs/single_model_det/yolov8n_single_model/weights/best.pt --split val
+```
+
+Primary Stage 2 classifier workflow:
 
 Prepare the classification dataset:
 
@@ -63,13 +80,15 @@ python ml/train.py --stage2 --variant m --device mps
 Evaluate Stage 2 classification:
 
 ```bash
-python ml/evaluate.py --weights runs/stage2_cls/yolov8n_stage2/weights/best.pt --split val
-python ml/evaluate.py --weights runs/stage2_cls/yolov8n_stage2/weights/best.pt --cross-dataset pklot_test
-python ml/evaluate.py --compare \
+python ml/evaluate.py --stage2 --weights runs/stage2_cls/yolov8n_stage2/weights/best.pt --split val
+python ml/evaluate.py --stage2 --weights runs/stage2_cls/yolov8n_stage2/weights/best.pt --cross-dataset pklot_test
+python ml/evaluate.py --stage2 --compare \
   runs/stage2_cls/yolov8n_stage2/weights/best.pt \
   runs/stage2_cls/yolov8s_stage2/weights/best.pt \
   runs/stage2_cls/yolov8m_stage2/weights/best.pt
 ```
+
+The deployed/default runtime remains two-stage. The single-model detector exists only for ML-side comparison against the separate Stage 1 + Stage 2 approach.
 
 ## Edge Demo
 

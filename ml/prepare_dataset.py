@@ -8,6 +8,10 @@ Primary path:
 Secondary path:
   Stage 1 detection dataset generation remains available, but is not the
   default success path for the repo.
+
+ML-only baseline:
+  Single-model full-frame occupancy detection keeps PKLot frame labels as
+  `free` and `occupied` without a separate Stage 2 classifier.
 """
 
 from __future__ import annotations
@@ -31,6 +35,8 @@ _ROBOFLOW_OCC_IDS = {1}
 STAGE1_DATA_DIR = "stage1_data"
 STAGE1_YAML = "ml/stage1.yaml"
 STAGE2_DATA_DIR = "stage2_data"
+SINGLE_MODEL_DATA_DIR = "single_model_data"
+SINGLE_MODEL_YAML = "ml/single_model.yaml"
 PKLOT_TEST_DIR = "pklot_test"
 CNRPARK_TEST_DIR = "cnrpark_test"
 SANITY_REPORT = "dataset_report.json"
@@ -51,9 +57,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cnrpark-dir", default=None)
     parser.add_argument("--stage1", action="store_true", help="Prepare Stage 1 detection data.")
     parser.add_argument("--stage2", action="store_true", help="Prepare Stage 2 classification data.")
+    parser.add_argument(
+        "--single-model",
+        action="store_true",
+        help="Prepare ML-only single-model occupancy detection data.",
+    )
     parser.add_argument("--stage1-output", default=STAGE1_DATA_DIR)
     parser.add_argument("--stage1-yaml", default=STAGE1_YAML)
     parser.add_argument("--stage2-output", default=STAGE2_DATA_DIR)
+    parser.add_argument("--single-model-output", default=SINGLE_MODEL_DATA_DIR)
+    parser.add_argument("--single-model-yaml", default=SINGLE_MODEL_YAML)
     parser.add_argument("--patch-cache", default=None)
     parser.add_argument("--pklot-test-output", default=PKLOT_TEST_DIR)
     parser.add_argument("--cnrpark-test-output", default=CNRPARK_TEST_DIR)
@@ -293,6 +306,67 @@ def prepare_stage1(pklot_dir: Path, out_dir: Path, yaml_path: Path) -> None:
     print(f"  yaml        : {yaml_path}")
 
 
+def prepare_single_model_detection(pklot_dir: Path, out_dir: Path, yaml_path: Path) -> None:
+    print(f"\n[Single Model] Building occupancy detection dataset -> {out_dir}/")
+    splits = _roboflow_splits(pklot_dir)
+    if not splits:
+        raise SystemExit(
+            f"No Roboflow splits found in {pklot_dir}. Expected train/valid/test image+label dirs."
+        )
+
+    total_images = 0
+    total_boxes = 0
+    for split_name, image_dir, label_dir in splits:
+        out_image = out_dir / split_name / "images"
+        out_label = out_dir / split_name / "labels"
+        out_image.mkdir(parents=True, exist_ok=True)
+        out_label.mkdir(parents=True, exist_ok=True)
+
+        split_images = 0
+        split_boxes = 0
+        for image_path in _image_files(image_dir):
+            label_path = label_dir / f"{image_path.stem}.txt"
+            if not label_path.exists():
+                continue
+            valid_lines = []
+            for line in label_path.read_text().splitlines():
+                parts = line.strip().split()
+                if len(parts) < 5:
+                    continue
+                class_id = int(parts[0])
+                if class_id not in (_ROBOFLOW_FREE_IDS | _ROBOFLOW_OCC_IDS):
+                    continue
+                valid_lines.append(line.strip())
+                split_boxes += 1
+            if not valid_lines:
+                continue
+            shutil.copy2(image_path, out_image / image_path.name)
+            (out_label / f"{image_path.stem}.txt").write_text("\n".join(valid_lines) + "\n")
+            split_images += 1
+        print(f"  {split_name:5s}: {split_images:5d} images  {split_boxes:7d} boxes")
+        total_images += split_images
+        total_boxes += split_boxes
+
+    yaml_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(yaml_path, "w", encoding="utf-8") as f:
+        yaml.dump(
+            {
+                "path": str(out_dir.resolve()),
+                "train": "train/images",
+                "val": "valid/images",
+                "test": "test/images",
+                "nc": 2,
+                "names": ["free", "occupied"],
+            },
+            f,
+            default_flow_style=False,
+            sort_keys=False,
+        )
+
+    print(f"  total       : {total_images} images  {total_boxes} boxes")
+    print(f"  yaml        : {yaml_path}")
+
+
 def collect_roboflow_patches(root: Path, patch_output: Path) -> dict[str, list[Path]]:
     patches: dict[str, list[Path]] = {"free": [], "occupied": []}
     print(f"\n[Stage 2] Cropping PKLot patches -> {patch_output}/")
@@ -442,7 +516,7 @@ def weather_split_paths(root: Path) -> dict[str, Path]:
 
 def main() -> None:
     args = parse_args()
-    if not args.stage1 and not args.stage2:
+    if not args.stage1 and not args.stage2 and not args.single_model:
         args.stage2 = True
 
     pklot_dir = Path(args.pklot_dir)
@@ -453,6 +527,12 @@ def main() -> None:
 
     if args.stage1:
         prepare_stage1(pklot_dir, Path(args.stage1_output), Path(args.stage1_yaml))
+    if args.single_model:
+        prepare_single_model_detection(
+            pklot_dir,
+            Path(args.single_model_output),
+            Path(args.single_model_yaml),
+        )
     if args.stage2:
         prepare_stage2(args)
 

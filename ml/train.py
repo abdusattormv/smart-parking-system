@@ -6,6 +6,9 @@ Primary path:
 
 Secondary path:
   Stage 1 spot detection for optional ROI discovery experiments.
+
+ML-only baseline:
+  Single-model full-frame occupancy detector with `free` / `occupied` classes.
 """
 
 from __future__ import annotations
@@ -21,28 +24,37 @@ from ultralytics import YOLO
 
 STAGE1_YAML = "ml/stage1.yaml"
 STAGE2_DATA_DIR = "stage2_data"
+SINGLE_MODEL_YAML = "ml/single_model.yaml"
 
 STAGE1_EPOCHS = 50
 STAGE2_EPOCHS = 60
+SINGLE_MODEL_EPOCHS = 60
 STAGE1_IMGSZ = 640
 STAGE2_IMGSZ = 64
+SINGLE_MODEL_IMGSZ = 640
 DEFAULT_BATCH = 16
 STAGE2_BATCH = 64
 DEFAULT_LR = 0.003
 DEFAULT_PATIENCE = 15
 STAGE1_PROJECT = "runs/stage1_det"
 STAGE2_PROJECT = "runs/stage2_cls"
+SINGLE_MODEL_PROJECT = "runs/single_model_det"
 MODEL_DIR = "models"
 MIN_ULTRALYTICS = (8, 4, 38)
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Train Stage 2 classification by default, or Stage 1 detection when requested."
+        description="Train Stage 1 detector, Stage 2 classifier, or the ML-only single-model baseline."
     )
-    group = parser.add_mutually_exclusive_group()
+    group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--stage1", action="store_true", help="Train Stage 1 detector.")
     group.add_argument("--stage2", action="store_true", help="Train Stage 2 classifier.")
+    group.add_argument(
+        "--single-model",
+        action="store_true",
+        help="Train the ML-only single-model occupancy detector baseline.",
+    )
     parser.add_argument("--variant", choices=["n", "s", "m"], default="n")
     parser.add_argument("--data", default=None, help="Override data path.")
     parser.add_argument("--epochs", type=int, default=None)
@@ -106,11 +118,21 @@ def resolve_stage2_data(data: str | None) -> str:
     return str(path)
 
 
+def resolve_single_model_data(data: str | None) -> str:
+    path = Path(data or SINGLE_MODEL_YAML)
+    if not path.exists():
+        raise SystemExit(
+            f"Single-model YAML not found: {path}\n"
+            "Run: python ml/prepare_dataset.py --single-model --pklot-dir <roboflow-export>"
+        )
+    return str(path)
+
+
 def task_defaults(args: argparse.Namespace) -> dict[str, object]:
-    stage2 = not args.stage1
-    if stage2:
+    if args.stage2:
         return {
             "task": "classify",
+            "track": "stage2",
             "data_path": resolve_stage2_data(args.data),
             "weights": f"yolov8{args.variant}-cls.pt",
             "epochs": args.epochs or STAGE2_EPOCHS,
@@ -120,8 +142,22 @@ def task_defaults(args: argparse.Namespace) -> dict[str, object]:
             "run_name": f"yolov8{args.variant}_stage2",
             "report_name": f"stage2_{args.variant}_report.json",
         }
+    if args.single_model:
+        return {
+            "task": "detect",
+            "track": "single_model",
+            "data_path": resolve_single_model_data(args.data),
+            "weights": f"yolov8{args.variant}.pt",
+            "epochs": args.epochs or SINGLE_MODEL_EPOCHS,
+            "imgsz": args.imgsz or SINGLE_MODEL_IMGSZ,
+            "batch": args.batch or DEFAULT_BATCH,
+            "project_dir": SINGLE_MODEL_PROJECT,
+            "run_name": f"yolov8{args.variant}_single_model",
+            "report_name": f"single_model_{args.variant}_report.json",
+        }
     return {
         "task": "detect",
+        "track": "stage1",
         "data_path": resolve_stage1_data(args.data),
         "weights": f"yolov8{args.variant}.pt",
         "epochs": args.epochs or STAGE1_EPOCHS,
@@ -192,6 +228,7 @@ def main() -> None:
     metric_report = extract_metrics(defaults["task"], results)
     report = {
         "task": defaults["task"],
+        "track": defaults["track"],
         "variant": args.variant,
         "model": defaults["weights"],
         "data": defaults["data_path"],
@@ -228,8 +265,10 @@ def main() -> None:
     with open(report_path, "w", encoding="utf-8") as f:
         json.dump(report, f, indent=2)
     print(f"Report saved   : {report_path}")
-    if defaults["task"] == "classify":
+    if defaults["track"] == "stage2":
         print("Comparison set : run variants n, s, m and compare Top-1 accuracy, size, and latency.")
+    elif defaults["track"] == "single_model":
+        print("Baseline role  : compare this occupancy detector against the separate Stage 1 + Stage 2 pipeline.")
 
 
 if __name__ == "__main__":

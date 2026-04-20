@@ -5,6 +5,7 @@ Stage 2 classification is the primary evaluation path and reports:
   top-1 accuracy, precision, recall, F1, confusion matrix, and per-class support.
 
 Stage 1 detection support remains available for optional detector experiments.
+Single-model occupancy detection is supported as an ML-only comparison baseline.
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ from ultralytics import YOLO
 
 DEFAULT_STAGE1_DATA = "ml/stage1.yaml"
 DEFAULT_STAGE2_DATA = "stage2_data"
+DEFAULT_SINGLE_MODEL_DATA = "ml/single_model.yaml"
 DEFAULT_LOG_DIR = "logs"
 CLASS_NAMES = ("free", "occupied")
 WEATHER_NAMES = ("sunny", "cloudy", "rainy")
@@ -28,21 +30,27 @@ WEATHER_NAMES = ("sunny", "cloudy", "rainy")
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Evaluate smart parking models. Stage 2 classification is the default path."
+        description="Evaluate Stage 1, Stage 2, or single-model smart parking tracks."
     )
     parser.add_argument("--weights", help="Path to model checkpoint (.pt or .onnx).")
     parser.add_argument("--data", default=None, help="Stage 1 YAML or Stage 2 dataset root.")
     parser.add_argument("--imgsz", type=int, default=64)
     parser.add_argument("--device", default="mps")
     parser.add_argument("--log-dir", default=DEFAULT_LOG_DIR)
-    parser.add_argument("--stage1", action="store_true", help="Evaluate a Stage 1 detector.")
-    parser.add_argument("--stage2", action="store_true", help="Evaluate a Stage 2 classifier.")
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--stage1", action="store_true", help="Evaluate a Stage 1 detector.")
+    mode.add_argument("--stage2", action="store_true", help="Evaluate a Stage 2 classifier.")
+    mode.add_argument(
+        "--single-model",
+        action="store_true",
+        help="Evaluate the ML-only single-model occupancy detector baseline.",
+    )
     parser.add_argument("--split", choices=["train", "val", "test"], default="val")
     parser.add_argument(
         "--compare",
         nargs="+",
         metavar="WEIGHTS",
-        help="Compare multiple checkpoints on the selected Stage 2 split.",
+        help="Compare multiple checkpoints on the selected split for the chosen mode.",
     )
     parser.add_argument(
         "--cross-dataset",
@@ -106,6 +114,21 @@ def stage1_data(data: str | None) -> str:
     if not path.exists():
         raise SystemExit(f"Stage 1 data YAML not found: {path}")
     return str(path)
+
+
+def single_model_data(data: str | None) -> str:
+    path = Path(data or DEFAULT_SINGLE_MODEL_DATA)
+    if not path.exists():
+        raise SystemExit(f"Single-model data YAML not found: {path}")
+    return str(path)
+
+
+def evaluation_mode(args: argparse.Namespace) -> str:
+    if args.stage1:
+        return "stage1"
+    if args.single_model:
+        return "single_model"
+    return "stage2"
 
 
 def classification_samples(dataset_dir: Path) -> list[tuple[Path, str]]:
@@ -192,6 +215,29 @@ def evaluate_stage1(args: argparse.Namespace) -> None:
     append_csv([row], Path(args.log_dir), "stage1_evaluation.csv")
 
 
+def evaluate_single_model(args: argparse.Namespace) -> None:
+    if not args.weights:
+        raise SystemExit("--weights is required for single-model evaluation.")
+    model = YOLO(args.weights)
+    metrics = model.val(
+        data=single_model_data(args.data),
+        split=args.split,
+        device=args.device,
+        imgsz=max(args.imgsz, 640),
+        verbose=False,
+    ).results_dict
+    row = {
+        "model": Path(args.weights).parent.parent.name,
+        "split": args.split,
+        "mAP50": round(float(metrics.get("metrics/mAP50(B)", 0.0)), 4),
+        "mAP50_95": round(float(metrics.get("metrics/mAP50-95(B)", 0.0)), 4),
+        "precision": round(float(metrics.get("metrics/precision(B)", 0.0)), 4),
+        "recall": round(float(metrics.get("metrics/recall(B)", 0.0)), 4),
+    }
+    print_rows([row], "Single-Model Detection Evaluation")
+    append_csv([row], Path(args.log_dir), "single_model_evaluation.csv")
+
+
 def evaluate_stage2(weights: str, dataset_dir: Path, args: argparse.Namespace, label: str) -> dict[str, object]:
     metrics = classify_dataset(
         weights,
@@ -223,18 +269,51 @@ def eval_split_dir(root: Path, split: str) -> Path:
 
 
 def evaluate_compare(args: argparse.Namespace) -> None:
-    root = stage2_root(args.data)
-    dataset_dir = eval_split_dir(root, args.split)
+    mode = evaluation_mode(args)
+    if mode == "stage2":
+        root = stage2_root(args.data)
+        dataset_dir = eval_split_dir(root, args.split)
+        rows = []
+        for weights in args.compare:
+            if not Path(weights).exists():
+                print(f"Skipping missing checkpoint: {weights}")
+                continue
+            row = evaluate_stage2(weights, dataset_dir, args, f"{root.name}/{args.split}")
+            row["size_mb"] = round(Path(weights).stat().st_size / 1_048_576, 2)
+            rows.append(row)
+        print_rows(rows, "Stage 2 Model Comparison")
+        append_csv(rows, Path(args.log_dir), "stage2_model_comparison.csv")
+        return
+
+    data_yaml = stage1_data(args.data) if mode == "stage1" else single_model_data(args.data)
+    title = "Stage 1 Detection Comparison" if mode == "stage1" else "Single-Model Detection Comparison"
+    filename = "stage1_model_comparison.csv" if mode == "stage1" else "single_model_comparison.csv"
     rows = []
     for weights in args.compare:
         if not Path(weights).exists():
             print(f"Skipping missing checkpoint: {weights}")
             continue
-        row = evaluate_stage2(weights, dataset_dir, args, f"{root.name}/{args.split}")
-        row["size_mb"] = round(Path(weights).stat().st_size / 1_048_576, 2)
-        rows.append(row)
-    print_rows(rows, "Stage 2 Model Comparison")
-    append_csv(rows, Path(args.log_dir), "stage2_model_comparison.csv")
+        model = YOLO(weights)
+        metrics = model.val(
+            data=data_yaml,
+            split=args.split,
+            device=args.device,
+            imgsz=max(args.imgsz, 640),
+            verbose=False,
+        ).results_dict
+        rows.append(
+            {
+                "model": Path(weights).parent.parent.name,
+                "split": args.split,
+                "size_mb": round(Path(weights).stat().st_size / 1_048_576, 2),
+                "mAP50": round(float(metrics.get("metrics/mAP50(B)", 0.0)), 4),
+                "mAP50_95": round(float(metrics.get("metrics/mAP50-95(B)", 0.0)), 4),
+                "precision": round(float(metrics.get("metrics/precision(B)", 0.0)), 4),
+                "recall": round(float(metrics.get("metrics/recall(B)", 0.0)), 4),
+            }
+        )
+    print_rows(rows, title)
+    append_csv(rows, Path(args.log_dir), filename)
 
 
 def evaluate_cross_dataset(args: argparse.Namespace) -> None:
@@ -288,23 +367,32 @@ def main() -> None:
         evaluate_compare(args)
         return
 
-    stage2_mode = not args.stage1
+    mode = evaluation_mode(args)
     if args.sweep:
+        if mode != "stage2":
+            raise SystemExit("--sweep is only supported for Stage 2 classification.")
         evaluate_threshold_sweep(args)
         return
     if args.cross_dataset:
+        if mode != "stage2":
+            raise SystemExit("--cross-dataset is only supported for Stage 2 classification.")
         evaluate_cross_dataset(args)
         return
     if args.per_weather:
+        if mode != "stage2":
+            raise SystemExit("--per-weather is only supported for Stage 2 classification.")
         evaluate_per_weather(args)
         return
     if not args.weights:
         raise SystemExit("--weights is required unless using --compare")
-    if stage2_mode:
+    if mode == "stage2":
         root = stage2_root(args.data)
         row = evaluate_stage2(args.weights, eval_split_dir(root, args.split), args, f"{root.name}/{args.split}")
         print_rows([row], "Stage 2 Classification Evaluation")
         append_csv([row], Path(args.log_dir), "stage2_evaluation.csv")
+        return
+    if mode == "single_model":
+        evaluate_single_model(args)
         return
     evaluate_stage1(args)
 

@@ -2,6 +2,7 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
 from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -12,6 +13,11 @@ from ml import prepare_dataset, train
 def make_image(path: Path, color: int) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     Image.new("RGB", (32, 24), color=(color, color, color)).save(path)
+
+
+def make_label(path: Path, lines: list[str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def test_stratified_split_creates_all_splits():
@@ -72,13 +78,61 @@ def test_weather_split_paths_requires_expected_layout(tmp_path):
         raise AssertionError("expected weather_split_paths to fail")
 
 
-def test_train_stage2_is_default(monkeypatch, tmp_path):
+def test_prepare_single_model_detection_preserves_two_classes(tmp_path):
+    root = tmp_path / "pklot"
+    make_image(root / "train" / "images" / "sample.jpg", 20)
+    make_label(
+        root / "train" / "labels" / "sample.txt",
+        [
+            "0 0.5 0.5 0.4 0.4",
+            "1 0.2 0.2 0.1 0.1",
+        ],
+    )
+    make_image(root / "valid" / "images" / "sample.jpg", 20)
+    make_label(root / "valid" / "labels" / "sample.txt", ["1 0.5 0.5 0.4 0.4"])
+    make_image(root / "test" / "images" / "sample.jpg", 20)
+    make_label(root / "test" / "labels" / "sample.txt", ["0 0.5 0.5 0.4 0.4"])
+
+    out_dir = tmp_path / "single_model_data"
+    yaml_path = tmp_path / "single_model.yaml"
+    prepare_dataset.prepare_single_model_detection(root, out_dir, yaml_path)
+
+    assert (out_dir / "train" / "images" / "sample.jpg").exists()
+    labels = (out_dir / "train" / "labels" / "sample.txt").read_text(encoding="utf-8").splitlines()
+    assert labels == ["0 0.5 0.5 0.4 0.4", "1 0.2 0.2 0.1 0.1"]
+    yaml_text = yaml_path.read_text(encoding="utf-8")
+    assert "names:" in yaml_text
+    assert "- free" in yaml_text
+    assert "- occupied" in yaml_text
+
+
+def test_train_requires_explicit_mode(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["train.py"])
+    with pytest.raises(SystemExit) as exc:
+        train.parse_args()
+    assert exc.value.code == 2
+
+
+def test_train_stage2_mode_resolution(monkeypatch, tmp_path):
     data_dir = tmp_path / "stage2_data"
     data_dir.mkdir()
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(train, "STAGE2_DATA_DIR", str(data_dir))
-    monkeypatch.setattr(sys, "argv", ["train.py"])
+    monkeypatch.setattr(sys, "argv", ["train.py", "--stage2"])
     args = train.parse_args()
     defaults = train.task_defaults(args)
     assert defaults["task"] == "classify"
+    assert defaults["track"] == "stage2"
     assert defaults["data_path"] == str(data_dir)
+
+
+def test_train_single_model_mode_resolution(monkeypatch, tmp_path):
+    yaml_path = tmp_path / "single_model.yaml"
+    yaml_path.write_text("path: /tmp\ntrain: train/images\nval: valid/images\ntest: test/images\nnc: 2\nnames: [free, occupied]\n", encoding="utf-8")
+    monkeypatch.setattr(train, "SINGLE_MODEL_YAML", str(yaml_path))
+    monkeypatch.setattr(sys, "argv", ["train.py", "--single-model"])
+    args = train.parse_args()
+    defaults = train.task_defaults(args)
+    assert defaults["task"] == "detect"
+    assert defaults["track"] == "single_model"
+    assert defaults["project_dir"] == train.SINGLE_MODEL_PROJECT
