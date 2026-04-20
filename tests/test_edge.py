@@ -1,127 +1,122 @@
 import sys
 from pathlib import Path
 
+import numpy as np
+import pytest
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from edge.detect import DEFAULT_OVERLAP_THRESHOLD, SmoothingBuffer, spot_occupied
+from edge.detect import (
+    SmoothingBuffer,
+    build_payload,
+    classify_patch,
+    crop_patch,
+    load_rois,
+    normalize_rois,
+    run_pipeline,
+)
 
 
-# ---------------------------------------------------------------------------
-# spot_occupied
-# ---------------------------------------------------------------------------
-
-def test_spot_occupied_no_boxes():
-    roi = [(0, 0), (100, 0), (100, 100), (0, 100)]
-    assert spot_occupied([], roi) is False
+class FakeProbs:
+    def __init__(self, top1: int, top1conf: float):
+        self.top1 = top1
+        self.top1conf = top1conf
 
 
-def test_spot_occupied_overlap():
-    roi = [(0, 0), (100, 0), (100, 100), (0, 100)]
-    # Box fully inside ROI: intersection 80×80 = 6400, roi_area 10000 → ratio 0.64 > 0.2
-    boxes = [[10.0, 10.0, 90.0, 90.0]]
-    assert spot_occupied(boxes, roi, threshold=DEFAULT_OVERLAP_THRESHOLD) is True
+class FakeResult:
+    def __init__(self, label: str, confidence: float):
+        self.names = {0: "free", 1: "occupied"}
+        self.probs = FakeProbs(1 if label == "occupied" else 0, confidence)
 
 
-def test_spot_occupied_no_overlap():
-    roi = [(0, 0), (100, 0), (100, 100), (0, 100)]
-    # Box completely outside
-    boxes = [[200.0, 200.0, 300.0, 300.0]]
-    assert spot_occupied(boxes, roi) is False
+class FakeYOLO:
+    def __init__(self, labels):
+        self.labels = iter(labels)
+
+    def __call__(self, *_args, **_kwargs):
+        label, confidence = next(self.labels)
+        return [FakeResult(label, confidence)]
 
 
-def test_spot_occupied_partial_overlap_below_threshold():
-    roi = [(0, 0), (100, 0), (100, 100), (0, 100)]
-    # Box overlaps only 5×100 = 500 / 10000 = 5% < 20% threshold
-    boxes = [[-95.0, 0.0, 5.0, 100.0]]
-    assert spot_occupied(boxes, roi, threshold=0.2) is False
+def test_normalize_rois_accepts_valid_boxes():
+    rois = normalize_rois({"spot_1": [0, 1, 10, 20]})
+    assert rois == {"spot_1": (0, 1, 10, 20)}
 
 
-def test_spot_occupied_partial_overlap_above_threshold():
-    roi = [(0, 0), (100, 0), (100, 100), (0, 100)]
-    # Box overlaps 50×100 = 5000 / 10000 = 50% > 20% threshold
-    boxes = [[-50.0, 0.0, 50.0, 100.0]]
-    assert spot_occupied(boxes, roi, threshold=0.2) is True
+def test_load_rois_reads_config(tmp_path):
+    config = tmp_path / "config.yaml"
+    config.write_text("rois:\n  a: [1, 2, 3, 4]\n", encoding="utf-8")
+    assert load_rois(config) == {"a": (1, 2, 3, 4)}
 
 
-def test_spot_occupied_zero_threshold():
-    """threshold=0.0 accepts any overlap (matches PRD's simple existence check)."""
-    roi = [(0, 0), (100, 0), (100, 100), (0, 100)]
-    boxes = [[-95.0, 0.0, 5.0, 100.0]]  # only 5% overlap
-    assert spot_occupied(boxes, roi, threshold=0.0) is True
+def test_crop_patch_returns_none_for_invalid_box():
+    frame = np.zeros((20, 20, 3), dtype=np.uint8)
+    assert crop_patch(frame, (10, 10, 5, 5)) is None
 
 
-def test_spot_occupied_multiple_boxes_one_qualifies():
-    roi = [(0, 0), (100, 0), (100, 100), (0, 100)]
-    boxes = [
-        [200.0, 200.0, 300.0, 300.0],  # outside
-        [10.0, 10.0, 90.0, 90.0],      # inside (64% overlap)
-    ]
-    assert spot_occupied(boxes, roi) is True
+def test_classify_patch_thresholds_occupied_predictions():
+    frame = np.ones((50, 50, 3), dtype=np.uint8)
+    model = FakeYOLO([("occupied", 0.49), ("occupied", 0.82)])
+
+    first_status, first_conf = classify_patch(frame, (0, 0, 20, 20), model, "cpu", 0.5)
+    second_status, second_conf = classify_patch(frame, (0, 0, 20, 20), model, "cpu", 0.5)
+
+    assert (first_status, round(first_conf, 2)) == ("free", 0.49)
+    assert (second_status, round(second_conf, 2)) == ("occupied", 0.82)
 
 
-# ---------------------------------------------------------------------------
-# SmoothingBuffer
-# ---------------------------------------------------------------------------
-
-def test_smoothing_majority_occupied():
-    buf = SmoothingBuffer(["A"], window=5)
-    for v in [True, True, True, False, False]:  # 3 vs 2 → occupied
-        buf.update({"A": v})
-    assert buf.get_status()["A"] == "occupied"
-
-
-def test_smoothing_all_free():
-    buf = SmoothingBuffer(["A"], window=3)
-    for v in [False, False, False]:
-        buf.update({"A": v})
-    assert buf.get_status()["A"] == "free"
+def test_classify_patch_invalid_crop_falls_back_to_free():
+    frame = np.ones((40, 40, 3), dtype=np.uint8)
+    status, confidence = classify_patch(
+        frame,
+        (100, 100, 120, 120),
+        FakeYOLO([("occupied", 0.9)]),
+        "cpu",
+        0.5,
+    )
+    assert status == "free"
+    assert confidence == 0.0
 
 
-def test_smoothing_single_true_frame():
-    # 1 reading in a window-5 buffer: sum=1 > len=1/2=0.5 → occupied
-    buf = SmoothingBuffer(["A"], window=5)
-    buf.update({"A": True})
-    assert buf.get_status()["A"] == "occupied"
+def test_smoothing_buffer_majority_vote():
+    buffer = SmoothingBuffer(window=3)
+    buffer.update({"spot_1": "occupied"})
+    buffer.update({"spot_1": "free"})
+    buffer.update({"spot_1": "occupied"})
+    assert buffer.get_status()["spot_1"] == "occupied"
 
 
-def test_smoothing_single_false_frame():
-    buf = SmoothingBuffer(["A"], window=5)
-    buf.update({"A": False})
-    assert buf.get_status()["A"] == "free"
+def test_smoothing_buffer_tie_resolves_to_free():
+    buffer = SmoothingBuffer(window=4)
+    for value in ("occupied", "free", "occupied", "free"):
+        buffer.update({"spot_1": value})
+    assert buffer.get_status()["spot_1"] == "free"
 
 
-def test_smoothing_empty_buffer_defaults_free():
-    buf = SmoothingBuffer(["A"], window=5)
-    assert buf.get_status()["A"] == "free"
+def test_build_payload_uses_v3_schema():
+    payload = build_payload({"spot_1": "free"}, {"spot_1": 0.8123})
+    assert payload["spots"] == {"spot_1": "free"}
+    assert payload["confidence"] == {"spot_1": 0.812}
+    assert payload["timestamp"].endswith("Z")
 
 
-def test_smoothing_tie_resolves_to_free():
-    # 50/50 tie: sum=2, len=4, 2 > 2.0 is False → "free"
-    buf = SmoothingBuffer(["A"], window=4)
-    for v in [True, True, False, False]:
-        buf.update({"A": v})
-    assert buf.get_status()["A"] == "free"
+def test_run_pipeline_uses_shared_postprocess_path():
+    frame = np.ones((60, 60, 3), dtype=np.uint8)
+    args = type(
+        "Args",
+        (),
+        {"device": "cpu", "stage1_detector": False, "stage2_threshold": 0.5},
+    )()
 
+    payload, spot_boxes = run_pipeline(
+        frame=frame,
+        fixed_rois={"spot_1": (0, 0, 20, 20), "spot_2": (20, 0, 40, 20)},
+        stage1_model=None,
+        stage2_model=FakeYOLO([("occupied", 0.9), ("free", 0.7)]),
+        smooth_buf=SmoothingBuffer(window=1),
+        args=args,
+    )
 
-def test_smoothing_multiple_spots():
-    buf = SmoothingBuffer(["s1", "s2"], window=3)
-    for _ in range(3):
-        buf.update({"s1": True, "s2": False})
-    status = buf.get_status()
-    assert status["s1"] == "occupied"
-    assert status["s2"] == "free"
-
-
-def test_smoothing_reset_clears_history():
-    buf = SmoothingBuffer(["A"], window=3)
-    for _ in range(3):
-        buf.update({"A": True})
-    buf.reset()
-    assert buf.get_status()["A"] == "free"
-
-
-def test_smoothing_unknown_spot_ignored():
-    """update() with an unknown spot key should not raise."""
-    buf = SmoothingBuffer(["A"], window=3)
-    buf.update({"B": True})  # "B" not in buffer — silently ignored
-    assert buf.get_status()["A"] == "free"
+    assert spot_boxes["spot_1"] == (0, 0, 20, 20)
+    assert payload["spots"] == {"spot_1": "occupied", "spot_2": "free"}
+    assert payload["confidence"] == {"spot_1": 0.9, "spot_2": 0.7}
