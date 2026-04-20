@@ -1,23 +1,24 @@
-# Example configuration for the local edge pipeline.
-
 model:
-  path: artifacts/models/best.pt
-  input_size: 640
-  confidence_threshold: 0.25
-  iou_threshold: 0.45
+  stage2_path: runs/stage2_cls/yolov8n_stage2/weights/best.pt
   device: mps
 
+stage1:
+  detector_path: runs/stage1_det/yolov8n_stage1/weights/best.pt
+
 input:
-  mode: image
-  image_path: samples/parking-lot.jpg
-  camera_index: 0
   frame_interval_ms: 250
+  post_interval_s: 2.0
 
 postprocess:
   smoothing_window: 5
-  occupancy_overlap_threshold: 0.2
+  classifier_threshold: 0.5
 
 logging:
   output_dir: logs
-  format: csv
-  include_confidence: true
+  format: json
+
+rois:
+  spot_1: [50, 100, 200, 250]
+  spot_2: [210, 100, 360, 250]
+  spot_3: [370, 100, 520, 250]
+  spot_4: [530, 100, 680, 250]

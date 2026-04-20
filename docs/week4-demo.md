@@ -1,80 +1,53 @@
 # Week 4 Demo Runbook
 
-This runbook covers the presentation-ready Week 4 deliverables:
+The Week 4 demo should already reflect the v3 architecture, even if it uses a placeholder classifier checkpoint:
 
-- static-image YOLO demo
-- terminal JSON payload in the agreed contract shape
-- minimal FastAPI mock backend
+`static image -> fixed ROIs -> per-spot crop -> classifier -> JSON -> backend`
 
 ## Deliverables
 
-- `backend/main.py` - mock FastAPI app with `POST /update`
-- `edge/detect.py` - static-image inference demo using pretrained YOLO
-- `docs/week4-ml-notes.md` - dataset and training-plan notes for the ML team
-
-## Demo Assumptions
-
-- The Week 4 demo uses pretrained YOLO weights, not a PKLot-trained checkpoint.
-- The live presentation uses a static parking image for stability.
-- ROI-based occupancy logic, temporal smoothing, ONNX runtime, and SQLite logging are deferred to Week 5+.
+- `edge/detect.py` running the two-stage path with fixed ROIs by default
+- `backend/main.py` accepting and storing the v3 payload
+- one known-good static parking image
+- optional annotated output image saved before class
 
 ## Start The Backend
-
-From the project root:
 
 ```bash
 source .venv/bin/activate
 uvicorn backend.main:app --reload
 ```
 
-Expected endpoint for the demo:
-
-- `POST http://127.0.0.1:8000/update`
-
-Optional health check:
-
-```bash
-curl http://127.0.0.1:8000/health
-```
-
 ## Run The Static-Image Demo
-
-Use any parking lot image available locally:
 
 ```bash
 source .venv/bin/activate
 python edge/detect.py \
-  --image /absolute/path/to/parking-image.jpg \
+  --image samples/demo.jpg \
+  --stage2-model yolov8n-cls.pt \
   --post \
   --save-annotated logs/week4-demo-annotated.jpg
 ```
 
-If the backend is not running, omit `--post`:
+## What To Show
 
-```bash
-python edge/detect.py --image /absolute/path/to/parking-image.jpg
+1. the source parking image
+2. the ROI boxes and per-spot predictions on the annotated output
+3. terminal JSON in the v3 payload shape
+4. optional backend `/status` response showing the same payload
+
+## Demo Payload Example
+
+```json
+{
+  "spots": {
+    "spot_1": "free",
+    "spot_2": "occupied"
+  },
+  "confidence": {
+    "spot_1": 0.91,
+    "spot_2": 0.84
+  },
+  "timestamp": "2026-04-21T00:00:00Z"
+}
 ```
-
-## What To Show In Class
-
-1. The parking image being processed
-2. Bounding-box detections printed in the terminal
-3. The Week 4 JSON payload with:
-   - `spot_1 ... spot_n`
-   - `confidence_avg`
-   - `fps`
-   - `timestamp`
-4. Optional backend response `{"status": "ok", ...}`
-
-## Suggested Speaking Split
-
-- A: problem statement and why edge computing matters
-- B: PKLot dataset and YOLOv8n/s/m comparison plan
-- C: `detect.py` static-image demo and JSON contract
-- D: minimal FastAPI mock flow and Week 5 handoff path
-
-## Fallback Plan
-
-- Keep one known-good parking image ready locally
-- Save an annotated output image before class
-- Keep a screenshot of terminal JSON in case the live run misbehaves

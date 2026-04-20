@@ -1,42 +1,40 @@
 # Smart Parking System
 
-An intelligent edge computing project for parking occupancy detection with a stronger focus on ML quality, model comparison, and on-device reliability.
+This repo implements the v3 smart parking pipeline:
 
-## Project Story
+`static camera -> fixed ROIs -> per-spot crop -> YOLOv8*-cls -> temporal smoothing -> JSON -> FastAPI`
 
-This project is a camera-based smart parking prototype that compares YOLOv8n, YOLOv8s, and YOLOv8m on PKLot, evaluates INT8 quantization for edge deployment, and demonstrates a stable on-device inference pipeline with minimal backend logging.
+Fixed ROIs are the default Stage 1 path because the target demo camera is static. An optional YOLO Stage 1 detector remains available for experiments, but Stage 2 patch classification is the main ML accuracy track.
 
-The system follows a privacy-first design:
+## Repo Focus
 
-- video stays on the edge device
-- inference runs locally on a MacBook
-- results are recorded and optionally logged through a minimal FastAPI backend
-- a full web dashboard is out of scope in favor of ML and edge improvements
+- `edge/` runs the two-stage edge pipeline and emits the v3 payload contract
+- `ml/` prepares Stage 2 datasets, trains YOLOv8 classification models, and evaluates classification metrics
+- `backend/` stores payloads from the edge pipeline and returns latest/history views
+- `docs/` contains the canonical PRD and aligned milestone notes
 
-## Core Tracks
+## Canonical Artifacts
 
-- `edge/` - on-device inference pipeline, ROI logic, smoothing, benchmarking, and demo flow
-- `backend/` - minimal FastAPI logging layer for `/update` and `/status`
-- `docs/` - PRD, report outline, dataset notes, and evaluation materials
+- Stage 2 dataset: `stage2_data/`
+- Cross-dataset exports: `pklot_test/`, `cnrpark_test/`
+- Stage 2 training handoff: `runs/stage2_cls/.../weights/best.pt`
+- Backend payload:
 
-There is no frontend scope in the current PRD.
+```json
+{
+  "spots": {
+    "spot_1": "free",
+    "spot_2": "occupied"
+  },
+  "confidence": {
+    "spot_1": 0.91,
+    "spot_2": 0.84
+  },
+  "timestamp": "2026-04-21T00:00:00Z"
+}
+```
 
-## Technical Focus
-
-- Python
-- OpenCV
-- YOLOv8 / Ultralytics
-- FastAPI
-- SQLite
-- ONNX / ONNX Runtime
-- Apple Silicon MPS or CPU fallback
-- local CSV/JSON logging for evidence and analysis
-
-## Environment Setup
-
-The project uses a shared Python virtual environment at `.venv` for both ML and edge work.
-
-Quick start:
+## Setup
 
 ```bash
 python3 -m venv .venv
@@ -45,74 +43,55 @@ python -m pip install --upgrade pip
 pip install -r requirements-dev.txt
 ```
 
-Or use:
+## Stage 2 Workflow
+
+Prepare the classification dataset:
 
 ```bash
-make install-dev
+python ml/prepare_dataset.py --stage2 --pklot-dir /path/to/pklot_roboflow
+python ml/prepare_dataset.py --stage2 --pklot-dir /path/to/pklot_roboflow --cnrpark-dir /path/to/cnrpark_ext
 ```
 
-Detailed setup notes live in [docs/environment-setup.md](/Users/thebkht/Projects/smart-parking-system/docs/environment-setup.md).
-
-## Revised Goals
-
-- fine-tune and compare YOLOv8n, YOLOv8s, and YOLOv8m on PKLot
-- apply INT8 quantization and measure the accuracy and speed tradeoff
-- evaluate per-weather performance and threshold-tuning behavior
-- strengthen the local edge inference pipeline with ROI logic and temporal smoothing
-- benchmark FPS and latency across MPS, CPU, ONNX FP32, and ONNX INT8
-- capture timestamped logs that support report figures and tables
-
-## Team Structure
-
-- ML team (A + B) - dataset preparation, model training, export, quantization, threshold tuning, per-weather evaluation
-- Edge team (C + D) - capture/inference runner, ROI logic, smoothing, benchmarking, minimal FastAPI logging, system integration
-
-## Handoff Contract
-
-The ML team provides:
-
-- `best.pt`
-- `best.onnx`
-- documented class labels
-- expected input size
-- recommended confidence and IoU thresholds
-
-The edge team consumes those artifacts and produces:
-
-- per-spot occupancy output
-- timestamped JSON or CSV logs
-- minimal backend updates to `/update` and `/status`
-- demo-ready inference runs on static images or live camera input
-
-## Milestone Snapshot
-
-- Week 4 - dataset overview, model comparison plan, training config, static-image demo, mock FastAPI endpoint
-- Week 5 - train YOLOv8n and YOLOv8s, complete ROI and smoothing logic, deliver `best.pt` and `best.onnx`
-- Week 6 - INT8 export, confidence and IoU sweeps, full end-to-end integration
-- Week 7 - model comparison table, per-weather results, FPS and latency tables, bandwidth analysis
-- Week 8 - final report and demo centered on ML gains and edge reliability
-
-## Week 4 Run Flow
-
-Use the Week 4 demo package for the current class milestone:
+Train the main classifier comparison set:
 
 ```bash
-source .venv/bin/activate
+python ml/train.py --stage2 --variant n --device mps
+python ml/train.py --stage2 --variant s --device mps
+python ml/train.py --stage2 --variant m --device mps
+```
+
+Evaluate Stage 2 classification:
+
+```bash
+python ml/evaluate.py --weights runs/stage2_cls/yolov8n_stage2/weights/best.pt --split val
+python ml/evaluate.py --weights runs/stage2_cls/yolov8n_stage2/weights/best.pt --cross-dataset pklot_test
+python ml/evaluate.py --compare \
+  runs/stage2_cls/yolov8n_stage2/weights/best.pt \
+  runs/stage2_cls/yolov8s_stage2/weights/best.pt \
+  runs/stage2_cls/yolov8m_stage2/weights/best.pt
+```
+
+## Edge Demo
+
+Start the backend:
+
+```bash
 uvicorn backend.main:app --reload
 ```
 
-Then run:
+Run image inference with fixed ROIs:
 
 ```bash
-python edge/detect.py --image /absolute/path/to/parking-image.jpg --post
+python edge/detect.py \
+  --image samples/demo.jpg \
+  --stage2-model runs/stage2_cls/yolov8n_stage2/weights/best.pt \
+  --post \
+  --save-annotated logs/demo-annotated.jpg
 ```
 
-More details live in [docs/week4-demo.md](/Users/thebkht/Projects/smart-parking-system/docs/week4-demo.md).
+## Docs
 
-## Acceptance Criteria
-
-- the model comparison table is complete for the trained variants
-- INT8 vs FP32 results are reported
-- occupancy predictions are stable enough for a live demo
-- ROI-based spot classification and temporal smoothing work on the demo setup
-- the final presentation does not depend on a web UI
+- Canonical PRD: [docs/prd.md](/Users/thebkht/Projects/smart-parking-system/docs/prd.md)
+- Docs index: [docs/README.md](/Users/thebkht/Projects/smart-parking-system/docs/README.md)
+- Edge details: [edge/README.md](/Users/thebkht/Projects/smart-parking-system/edge/README.md)
+- Backend contract: [backend/README.md](/Users/thebkht/Projects/smart-parking-system/backend/README.md)

@@ -1,15 +1,14 @@
 # Docs
 
-Project notes, planning material, technical report inputs, and evaluation artifacts live here.
+Use [docs/prd.md](/Users/thebkht/Projects/smart-parking-system/docs/prd.md) as the canonical project definition.
 
-## Suggested Contents
+Supporting docs:
 
-- PRD and milestone plan
-- dataset notes and preprocessing decisions
-- model comparison, quantization, and error analysis notes
-- edge evaluation checklist
-- report outline and presentation material
+- [docs/week4-demo.md](/Users/thebkht/Projects/smart-parking-system/docs/week4-demo.md) for the current static-image demo flow
+- [docs/week4-ml-notes.md](/Users/thebkht/Projects/smart-parking-system/docs/week4-ml-notes.md) for Stage 2 ML prep and comparison notes
+- [edge/README.md](/Users/thebkht/Projects/smart-parking-system/edge/README.md) for the edge runtime contract
+- [backend/README.md](/Users/thebkht/Projects/smart-parking-system/backend/README.md) for backend payload persistence
 
-## Current Priority
+Everything in this folder should describe the same v3 architecture:
 
-The main documentation priority is to support the current PRD: ML model comparison, INT8 quantization, ROI-based edge logic, and a minimal backend logger with no frontend scope.
+`static camera -> fixed ROIs -> per-spot crop -> classifier -> temporal smoothing -> JSON -> FastAPI`

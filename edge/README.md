@@ -1,57 +1,72 @@
 # Edge Track
 
-Python-based on-device inference pipeline for local parking occupancy detection.
+The edge pipeline follows the v3 architecture:
 
-## Purpose
+`static camera -> fixed ROIs -> crop each spot -> YOLOv8*-cls -> status smoothing -> JSON -> FastAPI`
 
-The edge track is responsible for running the parking model locally, converting detections into per-spot occupancy states, stabilizing those states across frames, and recording local evidence for evaluation and demos.
+## Default Behavior
 
-## Main Responsibilities
+- fixed ROI boxes are the default Stage 1 path
+- Stage 2 classification is the required model path for normal use
+- smoothing stabilizes only the final occupied/free status
+- confidence values are reported directly from the classifier and are not smoothed
+- image mode and camera mode share the same inference and postprocess logic
 
-- capture frames from a webcam or load static parking images
-- load the trained model artifact (`best.pt` or optional `best.onnx`)
-- run inference on `mps` when available with `cpu` fallback
-- map detections to predefined parking spot regions
-- apply temporal smoothing or debouncing to reduce flicker
-- output per-spot occupied/free predictions
-- log timestamps, statuses, confidences, FPS, and latency in local JSON or CSV files
+## Optional Stage 1 Detector
 
-## Week 4 Deliverable
+`edge/detect.py` supports a YOLO Stage 1 spot detector behind `--stage1-detector`, but that is secondary work. The main demo and main accuracy story should assume static camera placement plus configured ROIs.
 
-Week 4 only requires a stable static-image demo. The first implementation should:
+## Config
 
-- run pretrained YOLO on one parking image
-- print detections in the terminal
-- emit the agreed JSON contract shape
-- optionally POST that payload to the mock FastAPI backend
+Copy [edge/config.example.yaml](/Users/thebkht/Projects/smart-parking-system/edge/config.example.yaml) to `edge/config.yaml` and adjust:
 
-ROI-based occupancy and temporal smoothing are intentionally deferred to Week 5.
+- `model.stage2_path` for the classifier checkpoint
+- `postprocess.classifier_threshold` for deployed occupied/free thresholding
+- `postprocess.smoothing_window` for temporal status smoothing
+- `rois` for camera-specific parking spot boxes
 
-## Ownership Split
+## Commands
 
-- Edge Engineer 1 - capture/inference runner, model loading, device handling, FPS and latency measurement
-- Edge Engineer 2 - spot mapping, post-processing, local logging, and demo integration
+Static image:
 
-## Expected Inputs
+```bash
+python edge/detect.py \
+  --image samples/demo.jpg \
+  --stage2-model runs/stage2_cls/yolov8n_stage2/weights/best.pt \
+  --save-annotated logs/annotated.jpg
+```
 
-From the ML track:
+Live camera:
 
-- final trained model artifact
-- class labels
-- expected input size
-- recommended confidence threshold
-- recommended IoU threshold
+```bash
+python edge/detect.py \
+  --camera 0 \
+  --stage2-model runs/stage2_cls/yolov8n_stage2/weights/best.pt \
+  --post
+```
 
-## Expected Outputs
+Optional Stage 1 detector:
 
-- per-spot occupancy predictions
-- timestamped local logs for analysis and report evidence
-- stable demo runs for static-image and live-camera modes
+```bash
+python edge/detect.py \
+  --image samples/demo.jpg \
+  --stage1-detector \
+  --stage1-model runs/stage1_det/yolov8n_stage1/weights/best.pt \
+  --stage2-model runs/stage2_cls/yolov8n_stage2/weights/best.pt
+```
 
-## Validation Checklist
+## Payload Contract
 
-- static image mode works correctly
-- live camera mode works correctly
-- `mps` and `cpu` paths are handled safely
-- smoothing behavior is stable across consecutive frames
-- logs are usable for Week 7 analysis and Week 8 reporting
+```json
+{
+  "spots": {
+    "spot_1": "free",
+    "spot_2": "occupied"
+  },
+  "confidence": {
+    "spot_1": 0.91,
+    "spot_2": 0.84
+  },
+  "timestamp": "2026-04-21T00:00:00Z"
+}
+```

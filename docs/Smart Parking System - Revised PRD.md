@@ -1,14 +1,10 @@
-# Smart Parking System — Full Project PRD
+# Smart Parking System - Revised PRD
 
-This file mirrors [docs/prd.md](/Users/thebkht/Projects/smart-parking-system/docs/prd.md) so the team has a clearly named PRD copy for sharing.
+Use [docs/prd.md](/Users/thebkht/Projects/smart-parking-system/docs/prd.md) as the canonical PRD.
 
-Key direction:
+This mirror exists only as a friendly filename for sharing. It should not diverge from the canonical v3 definition:
 
-- ML team and Edge team work in parallel
-- frontend is removed from scope
-- backend is minimal and only used for result logging
-- YOLOv8n, YOLOv8s, and YOLOv8m are compared
-- INT8 quantization is part of the core evaluation
-- ROI-based spot logic and temporal smoothing are part of the edge work
-
-For the full version, use [docs/prd.md](/Users/thebkht/Projects/smart-parking-system/docs/prd.md).
+- fixed ROIs are the default Stage 1 path
+- Stage 2 patch classification is the main ML accuracy target
+- the runtime contract is `spots` + `confidence` + UTC `timestamp`
+- backend persistence stores the edge payload as-is

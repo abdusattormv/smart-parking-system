@@ -1,27 +1,47 @@
 # Backend Layer
 
-The backend is part of the current PRD, but only as a minimal logging layer for the edge pipeline.
+The backend is a minimal persistence layer for the v3 edge payload. It does not add frontend concerns or legacy summary fields.
 
-## Current Scope
+## Endpoints
 
-The backend team responsibility is intentionally small:
+- `POST /update` accepts the v3 payload and stores it as-is
+- `GET /status` returns the latest stored payload as-is
+- `GET /history` returns stored payloads in a stable wrapper with `recorded_at`
+- `GET /health` returns a basic health response
 
-- `POST /update` receives occupancy JSON from the edge script
-- `GET /status` returns the latest snapshot
-- optional `GET /history` returns recent logged results for evaluation
-- SQLite stores lightweight result logs only
+## Payload Contract
 
-## Week 4 Deliverable
+```json
+{
+  "spots": {
+    "spot_1": "free",
+    "spot_2": "occupied"
+  },
+  "confidence": {
+    "spot_1": 0.91,
+    "spot_2": 0.84
+  },
+  "timestamp": "2026-04-21T00:00:00Z"
+}
+```
 
-For Week 4, only a mock `POST /update` endpoint is required. It should accept the demo payload and return a success response so the edge team can show the end-to-end flow in class.
+## History Shape
 
-## Not in Scope
-
-- no frontend serving
-- no WebSocket support
-- no complex relational schema
-- no business-heavy analytics layer
-
-## Design Goal
-
-Keep the service tiny, demo-safe, and easy to remove if the team decides local file logging is enough for the final presentation.
+```json
+{
+  "items": [
+    {
+      "payload": {
+        "spots": {
+          "spot_1": "free"
+        },
+        "confidence": {
+          "spot_1": 0.91
+        },
+        "timestamp": "2026-04-21T00:00:00Z"
+      },
+      "recorded_at": "2026-04-21T00:00:01Z"
+    }
+  ]
+}
+```
