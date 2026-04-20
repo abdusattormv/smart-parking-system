@@ -426,9 +426,11 @@ def prepare_stage2(args: argparse.Namespace) -> None:
     for split_name in ("train", "val", "test"):
         counts = {cls: len(paths) for cls, paths in combined[split_name].items()}
         print(f"  {split_name:5s}: {counts}")
-    print(f"  pklot_test : {{cls: len(paths) for cls, paths in pklot_splits['test'].items()}}")
+    pklot_counts = {cls: len(paths) for cls, paths in pklot_splits["test"].items()}
+    print(f"  pklot_test : {pklot_counts}")
     if args.cnrpark_dir and any(cnr_images.values()):
-        print(f"  cnrpark_test: {{cls: len(paths) for cls, paths in cnrpark_splits['test'].items()}}")
+        cnr_counts = {cls: len(paths) for cls, paths in cnrpark_splits["test"].items()}
+        print(f"  cnrpark_test: {cnr_counts}")
 
 
 def weather_split_paths(root: Path) -> dict[str, Path]:
