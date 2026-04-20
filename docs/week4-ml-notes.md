@@ -4,6 +4,8 @@ Week 4 should frame Stage 2 classification as the main ML track, not full-scene 
 
 The repo also supports a single-model full-frame occupancy detector as an ML-only baseline, but it is not the deployed default path.
 
+PKLot full-frame detection should be treated carefully because the export includes zero-label frames. Detection prep now excludes those frames and writes a report so the baseline is not trained on unsafe background assumptions.
+
 ## Dataset Story
 
 - primary source: PKLot Roboflow export with spot boxes used to crop parking patches

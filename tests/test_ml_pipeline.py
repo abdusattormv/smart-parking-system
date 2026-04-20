@@ -104,6 +104,31 @@ def test_prepare_single_model_detection_preserves_two_classes(tmp_path):
     assert "names:" in yaml_text
     assert "- free" in yaml_text
     assert "- occupied" in yaml_text
+    report = json.loads((out_dir / prepare_dataset.DETECTION_REPORT).read_text(encoding="utf-8"))
+    assert report["track"] == "single_model"
+    assert report["splits"]["train"]["empty_label_frames_excluded"] == 0
+
+
+def test_prepare_stage1_excludes_empty_label_frames(tmp_path):
+    root = tmp_path / "pklot"
+    make_image(root / "train" / "images" / "kept.jpg", 20)
+    make_label(root / "train" / "labels" / "kept.txt", ["1 0.5 0.5 0.4 0.4"])
+    make_image(root / "train" / "images" / "empty.jpg", 20)
+    make_label(root / "train" / "labels" / "empty.txt", [])
+    make_image(root / "valid" / "images" / "sample.jpg", 20)
+    make_label(root / "valid" / "labels" / "sample.txt", ["0 0.5 0.5 0.4 0.4"])
+    make_image(root / "test" / "images" / "sample.jpg", 20)
+    make_label(root / "test" / "labels" / "sample.txt", ["0 0.5 0.5 0.4 0.4"])
+
+    out_dir = tmp_path / "stage1_data"
+    yaml_path = tmp_path / "stage1.yaml"
+    prepare_dataset.prepare_stage1(root, out_dir, yaml_path)
+
+    assert (out_dir / "train" / "images" / "kept.jpg").exists()
+    assert not (out_dir / "train" / "images" / "empty.jpg").exists()
+    report = json.loads((out_dir / prepare_dataset.DETECTION_REPORT).read_text(encoding="utf-8"))
+    assert report["track"] == "stage1"
+    assert report["splits"]["train"]["empty_label_frames_excluded"] == 1
 
 
 def test_train_requires_explicit_mode(monkeypatch):
@@ -136,3 +161,16 @@ def test_train_single_model_mode_resolution(monkeypatch, tmp_path):
     assert defaults["task"] == "detect"
     assert defaults["track"] == "single_model"
     assert defaults["project_dir"] == train.SINGLE_MODEL_PROJECT
+
+
+def test_train_stage2_accuracy_defaults(monkeypatch, tmp_path):
+    data_dir = tmp_path / "stage2_data"
+    data_dir.mkdir()
+    monkeypatch.setattr(train, "STAGE2_DATA_DIR", str(data_dir))
+    monkeypatch.setattr(sys, "argv", ["train.py", "--stage2"])
+    args = train.parse_args()
+    defaults = train.task_defaults(args)
+    assert defaults["lr0"] == train.STAGE2_LR
+    assert defaults["patience"] == train.STAGE2_PATIENCE
+    assert defaults["dropout"] == 0.1
+    assert defaults["cos_lr"] is True

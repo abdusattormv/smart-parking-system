@@ -11,6 +11,7 @@ The repo is aligned to a two-stage edge pipeline:
 - Stage 2 primary: PKLot + optional CNRPark-EXT patch classification
 - Single-model baseline: full-frame occupancy detector with `free` / `occupied` classes for ML comparison only
 - Main success metric: Stage 2 classification accuracy and cross-dataset generalization
+- Detection-style PKLot prep must exclude zero-label frames because they are unsafe supervision for full-frame detection baselines
 
 ## ML Scope
 

@@ -1,0 +1,8 @@
+path: /Users/thebkht/Projects/smart-parking-system/single_model_data
+train: train/images
+val: valid/images
+test: test/images
+nc: 2
+names:
+- free
+- occupied

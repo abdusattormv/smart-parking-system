@@ -77,6 +77,11 @@ python ml/train.py --stage2 --variant s --device mps
 python ml/train.py --stage2 --variant m --device mps
 ```
 
+Accuracy notes:
+
+- the saved `runs/stage2_cls/yolov8n_stage2/results.csv` shows an early accuracy collapse after epoch 4, so the repo now uses a lower Stage 2 learning rate, longer patience, cosine LR decay, and classifier dropout by default
+- PKLot full-frame exports include zero-label frames, so detection-style prep now excludes those frames and writes a detection dataset report under the output directory
+
 Evaluate Stage 2 classification:
 
 ```bash

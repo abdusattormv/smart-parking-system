@@ -34,8 +34,12 @@ STAGE2_IMGSZ = 64
 SINGLE_MODEL_IMGSZ = 640
 DEFAULT_BATCH = 16
 STAGE2_BATCH = 64
-DEFAULT_LR = 0.003
-DEFAULT_PATIENCE = 15
+STAGE1_LR = 0.003
+STAGE2_LR = 0.001
+SINGLE_MODEL_LR = 0.002
+STAGE1_PATIENCE = 15
+STAGE2_PATIENCE = 20
+SINGLE_MODEL_PATIENCE = 15
 STAGE1_PROJECT = "runs/stage1_det"
 STAGE2_PROJECT = "runs/stage2_cls"
 SINGLE_MODEL_PROJECT = "runs/single_model_det"
@@ -60,8 +64,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--epochs", type=int, default=None)
     parser.add_argument("--imgsz", type=int, default=None)
     parser.add_argument("--batch", type=int, default=None)
-    parser.add_argument("--lr", type=float, default=DEFAULT_LR, dest="lr0")
-    parser.add_argument("--patience", type=int, default=DEFAULT_PATIENCE)
+    parser.add_argument("--lr", type=float, default=None, dest="lr0")
+    parser.add_argument("--patience", type=int, default=None)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--no-batch-fallback", action="store_true")
@@ -72,6 +76,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--scale", type=float, default=0.15)
     parser.add_argument("--erasing", type=float, default=0.2)
     parser.add_argument("--mixup", type=float, default=0.0)
+    parser.add_argument("--dropout", type=float, default=None)
+    parser.add_argument("--cos-lr", action="store_true")
     return parser.parse_args()
 
 
@@ -141,6 +147,10 @@ def task_defaults(args: argparse.Namespace) -> dict[str, object]:
             "project_dir": STAGE2_PROJECT,
             "run_name": f"yolov8{args.variant}_stage2",
             "report_name": f"stage2_{args.variant}_report.json",
+            "lr0": args.lr0 if args.lr0 is not None else STAGE2_LR,
+            "patience": args.patience if args.patience is not None else STAGE2_PATIENCE,
+            "dropout": args.dropout if args.dropout is not None else 0.1,
+            "cos_lr": args.cos_lr or True,
         }
     if args.single_model:
         return {
@@ -154,6 +164,10 @@ def task_defaults(args: argparse.Namespace) -> dict[str, object]:
             "project_dir": SINGLE_MODEL_PROJECT,
             "run_name": f"yolov8{args.variant}_single_model",
             "report_name": f"single_model_{args.variant}_report.json",
+            "lr0": args.lr0 if args.lr0 is not None else SINGLE_MODEL_LR,
+            "patience": args.patience if args.patience is not None else SINGLE_MODEL_PATIENCE,
+            "dropout": args.dropout if args.dropout is not None else 0.0,
+            "cos_lr": args.cos_lr,
         }
     return {
         "task": "detect",
@@ -166,6 +180,10 @@ def task_defaults(args: argparse.Namespace) -> dict[str, object]:
         "project_dir": STAGE1_PROJECT,
         "run_name": f"yolov8{args.variant}_stage1",
         "report_name": f"stage1_{args.variant}_report.json",
+        "lr0": args.lr0 if args.lr0 is not None else STAGE1_LR,
+        "patience": args.patience if args.patience is not None else STAGE1_PATIENCE,
+        "dropout": args.dropout if args.dropout is not None else 0.0,
+        "cos_lr": args.cos_lr,
     }
 
 
@@ -196,6 +214,7 @@ def main() -> None:
         f"Epochs : {defaults['epochs']}  imgsz={defaults['imgsz']}  "
         f"batch={defaults['batch']}"
     )
+    print(f"Track  : {defaults['track']}  lr0={defaults['lr0']}  patience={defaults['patience']}")
 
     model = YOLO(defaults["weights"])
     train_kwargs = {
@@ -204,8 +223,8 @@ def main() -> None:
         "imgsz": defaults["imgsz"],
         "batch": defaults["batch"],
         "optimizer": "AdamW",
-        "lr0": args.lr0,
-        "patience": args.patience,
+        "lr0": defaults["lr0"],
+        "patience": defaults["patience"],
         "device": args.device,
         "project": defaults["project_dir"],
         "name": defaults["run_name"],
@@ -218,6 +237,8 @@ def main() -> None:
         "scale": args.scale,
         "erasing": args.erasing,
         "mixup": args.mixup,
+        "dropout": defaults["dropout"],
+        "cos_lr": defaults["cos_lr"],
     }
 
     started_at = time.perf_counter()
@@ -235,8 +256,8 @@ def main() -> None:
         "epochs": defaults["epochs"],
         "imgsz": defaults["imgsz"],
         "batch": defaults["batch"],
-        "lr0": args.lr0,
-        "patience": args.patience,
+        "lr0": defaults["lr0"],
+        "patience": defaults["patience"],
         "augmentation": {
             "degrees": args.degrees,
             "fliplr": args.fliplr,
@@ -244,6 +265,8 @@ def main() -> None:
             "scale": args.scale,
             "erasing": args.erasing,
             "mixup": args.mixup,
+            "dropout": defaults["dropout"],
+            "cos_lr": defaults["cos_lr"],
         },
         "train_time_s": round(elapsed, 2),
         "best_ckpt": str(best_ckpt),

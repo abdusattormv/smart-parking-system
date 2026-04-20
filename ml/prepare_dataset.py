@@ -40,6 +40,7 @@ SINGLE_MODEL_YAML = "ml/single_model.yaml"
 PKLOT_TEST_DIR = "pklot_test"
 CNRPARK_TEST_DIR = "cnrpark_test"
 SANITY_REPORT = "dataset_report.json"
+DETECTION_REPORT = "detection_dataset_report.json"
 WEATHER_CONVENTION = (
     "Expected weather layout under the dataset root: "
     "<root>/<weather>/<class>/*.jpg where weather is one of sunny, cloudy, rainy."
@@ -201,6 +202,21 @@ def report_duplicate_sources(class_images: dict[str, list[Path]]) -> list[str]:
     return [path for path, count in seen.items() if count > 1]
 
 
+def summarize_label_counts(counts: Iterable[int]) -> dict[str, object]:
+    counter = Counter(counts)
+    return {
+        "min": min(counts) if counts else 0,
+        "max": max(counts) if counts else 0,
+        "distribution": dict(sorted(counter.items())),
+    }
+
+
+def write_detection_report(report_path: Path, summary: dict[str, object]) -> None:
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(report_path, "w", encoding="utf-8") as f:
+        json.dump(summary, f, indent=2)
+
+
 def sanity_check_stage2(
     combined: dict[str, dict[str, list[Path]]],
     *,
@@ -259,6 +275,7 @@ def prepare_stage1(pklot_dir: Path, out_dir: Path, yaml_path: Path) -> None:
 
     total_images = 0
     total_boxes = 0
+    split_summary: dict[str, dict[str, object]] = {}
     for split_name, image_dir, label_dir in splits:
         out_image = out_dir / split_name / "images"
         out_label = out_dir / split_name / "labels"
@@ -267,11 +284,12 @@ def prepare_stage1(pklot_dir: Path, out_dir: Path, yaml_path: Path) -> None:
 
         split_images = 0
         split_boxes = 0
+        kept_label_counts: list[int] = []
+        skipped_empty = 0
         for image_path in _image_files(image_dir):
             label_path = label_dir / f"{image_path.stem}.txt"
             if not label_path.exists():
                 continue
-            shutil.copy2(image_path, out_image / image_path.name)
             remapped = []
             for line in label_path.read_text().splitlines():
                 parts = line.strip().split()
@@ -280,9 +298,19 @@ def prepare_stage1(pklot_dir: Path, out_dir: Path, yaml_path: Path) -> None:
                 remapped.append("0 " + " ".join(parts[1:]))
                 split_boxes += 1
             if remapped:
+                shutil.copy2(image_path, out_image / image_path.name)
                 (out_label / f"{image_path.stem}.txt").write_text("\n".join(remapped) + "\n")
                 split_images += 1
+                kept_label_counts.append(len(remapped))
+            else:
+                skipped_empty += 1
         print(f"  {split_name:5s}: {split_images:5d} images  {split_boxes:7d} boxes")
+        split_summary[split_name] = {
+            "images_kept": split_images,
+            "boxes_kept": split_boxes,
+            "empty_label_frames_excluded": skipped_empty,
+            "kept_label_count_summary": summarize_label_counts(kept_label_counts),
+        }
         total_images += split_images
         total_boxes += split_boxes
 
@@ -304,6 +332,16 @@ def prepare_stage1(pklot_dir: Path, out_dir: Path, yaml_path: Path) -> None:
 
     print(f"  total       : {total_images} images  {total_boxes} boxes")
     print(f"  yaml        : {yaml_path}")
+    report_path = out_dir / DETECTION_REPORT
+    write_detection_report(
+        report_path,
+        {
+            "track": "stage1",
+            "note": "Empty-label PKLot frames are excluded from detection training to avoid false background supervision.",
+            "splits": split_summary,
+        },
+    )
+    print(f"  report      : {report_path}")
 
 
 def prepare_single_model_detection(pklot_dir: Path, out_dir: Path, yaml_path: Path) -> None:
@@ -316,6 +354,7 @@ def prepare_single_model_detection(pklot_dir: Path, out_dir: Path, yaml_path: Pa
 
     total_images = 0
     total_boxes = 0
+    split_summary: dict[str, dict[str, object]] = {}
     for split_name, image_dir, label_dir in splits:
         out_image = out_dir / split_name / "images"
         out_label = out_dir / split_name / "labels"
@@ -324,6 +363,8 @@ def prepare_single_model_detection(pklot_dir: Path, out_dir: Path, yaml_path: Pa
 
         split_images = 0
         split_boxes = 0
+        kept_label_counts: list[int] = []
+        skipped_empty = 0
         for image_path in _image_files(image_dir):
             label_path = label_dir / f"{image_path.stem}.txt"
             if not label_path.exists():
@@ -339,11 +380,19 @@ def prepare_single_model_detection(pklot_dir: Path, out_dir: Path, yaml_path: Pa
                 valid_lines.append(line.strip())
                 split_boxes += 1
             if not valid_lines:
+                skipped_empty += 1
                 continue
             shutil.copy2(image_path, out_image / image_path.name)
             (out_label / f"{image_path.stem}.txt").write_text("\n".join(valid_lines) + "\n")
             split_images += 1
+            kept_label_counts.append(len(valid_lines))
         print(f"  {split_name:5s}: {split_images:5d} images  {split_boxes:7d} boxes")
+        split_summary[split_name] = {
+            "images_kept": split_images,
+            "boxes_kept": split_boxes,
+            "empty_label_frames_excluded": skipped_empty,
+            "kept_label_count_summary": summarize_label_counts(kept_label_counts),
+        }
         total_images += split_images
         total_boxes += split_boxes
 
@@ -365,6 +414,16 @@ def prepare_single_model_detection(pklot_dir: Path, out_dir: Path, yaml_path: Pa
 
     print(f"  total       : {total_images} images  {total_boxes} boxes")
     print(f"  yaml        : {yaml_path}")
+    report_path = out_dir / DETECTION_REPORT
+    write_detection_report(
+        report_path,
+        {
+            "track": "single_model",
+            "note": "PKLot full-frame detection is sensitive to incomplete labeling. Empty-label frames are excluded.",
+            "splits": split_summary,
+        },
+    )
+    print(f"  report      : {report_path}")
 
 
 def collect_roboflow_patches(root: Path, patch_output: Path) -> dict[str, list[Path]]:
