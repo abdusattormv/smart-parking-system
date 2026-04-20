@@ -1,22 +1,15 @@
 #!/usr/bin/env python3
-"""Two-stage edge inference pipeline for smart parking detection.
+"""Two-stage edge inference for the v3 smart parking pipeline.
 
-Stage 1 — Spot location:
-  Option A (default): Fixed ROI bounding boxes defined in FIXED_ROIS.
-  Option B (--no-fixed-roi): YOLO spot detector trained on Roboflow dataset.
+Default path:
+  static camera -> fixed ROIs -> crop each spot -> YOLOv8-cls -> smoothing -> JSON
 
-Stage 2 — Patch classification:
-  YOLOv8-cls model classifies each cropped spot patch as occupied or free.
-  Default model: yolov8n-cls.pt (pre-trained placeholder until trained model ready).
-
-Usage:
-  python edge/detect.py --image /path/to/parking.jpg
-  python edge/detect.py --image /path/to/parking.jpg --post
-  python edge/detect.py --image /path/to/parking.jpg --save-annotated logs/out.jpg
-  python edge/detect.py --image /path/to/parking.jpg --device cpu
-  python edge/detect.py --image /path/to/parking.jpg --stage2-model stage2_cls/weights/best.pt
-  python edge/detect.py --camera 0
+Optional Stage 1:
+  enable --stage1-detector to discover spot boxes with a YOLO detector instead of
+  using configured fixed ROIs.
 """
+
+from __future__ import annotations
 
 import argparse
 import csv
@@ -25,7 +18,7 @@ import time
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -40,75 +33,101 @@ DEFAULT_SMOOTH_N = 5
 DEFAULT_FRAME_INTERVAL_MS = 250
 DEFAULT_POST_INTERVAL_S = 2.0
 DEFAULT_LOG_DIR = Path("logs")
-DEFAULT_LOG_FORMAT = "csv"
-
+DEFAULT_LOG_FORMAT = "json"
+DEFAULT_STAGE2_THRESHOLD = 0.5
 DEFAULT_CONFIG_PATH = Path(__file__).parent / "config.yaml"
 
-# Fixed ROI bounding boxes: (x1, y1, x2, y2) pixel coordinates.
-# Adjust these once using an image viewer to match your camera angle.
-FIXED_ROIS: Dict[str, Tuple[int, int, int, int]] = {
-    "spot_1": (50,  100, 200, 250),
+DEFAULT_ROIS: Dict[str, Tuple[int, int, int, int]] = {
+    "spot_1": (50, 100, 200, 250),
     "spot_2": (210, 100, 360, 250),
     "spot_3": (370, 100, 520, 250),
     "spot_4": (530, 100, 680, 250),
 }
 
 
-# ---------------------------------------------------------------------------
-# Config helpers
-# ---------------------------------------------------------------------------
-
 def load_config(config_path: Path) -> dict:
     if not config_path.exists():
         return {}
-    with open(config_path) as f:
+    with open(config_path, encoding="utf-8") as f:
         return yaml.safe_load(f) or {}
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Two-stage smart parking edge inference pipeline."
+        description=(
+            "Run the v3 smart parking edge pipeline. Fixed ROIs are the default "
+            "Stage 1 path; YOLO spot detection is optional behind --stage1-detector."
+        )
     )
-    group = parser.add_mutually_exclusive_group()
+    group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--image", help="Path to a parking image (static mode).")
-    group.add_argument("--camera", type=int, metavar="INDEX",
-                       help="Camera device index for live capture mode.")
+    group.add_argument("--camera", type=int, metavar="INDEX", help="Camera device index.")
 
-    parser.add_argument("--stage2-model", default=None,
-                        help="Stage 2 classifier model path. Default: yolov8n-cls.pt.")
-    parser.add_argument("--stage1-model", default=None,
-                        help="Stage 1 spot detector model path (used with --no-fixed-roi).")
-    parser.add_argument("--no-fixed-roi", action="store_true",
-                        help="Use Stage 1 YOLO spot detector instead of fixed ROIs.")
-    parser.add_argument("--device", default=None,
-                        help="Inference device: mps or cpu. Default: mps.")
+    parser.add_argument(
+        "--stage2-model",
+        default=None,
+        help="Primary Stage 2 classifier checkpoint. Defaults to config or yolov8n-cls.pt.",
+    )
+    parser.add_argument(
+        "--stage1-model",
+        default=None,
+        help="Optional Stage 1 detector checkpoint used with --stage1-detector.",
+    )
+    parser.add_argument(
+        "--stage1-detector",
+        action="store_true",
+        help="Use YOLO Stage 1 detection instead of fixed ROIs.",
+    )
+    parser.add_argument("--device", default=None, help="Inference device. Default from config.")
     parser.add_argument("--backend-url", default=DEFAULT_BACKEND_URL)
-    parser.add_argument("--post", action="store_true",
-                        help="POST each payload to the backend.")
-    parser.add_argument("--save-annotated",
-                        help="Path to save annotated output image (image mode only).")
+    parser.add_argument("--post", action="store_true", help="POST payloads to the backend.")
+    parser.add_argument(
+        "--save-annotated",
+        help="Path to save an annotated output image in image mode.",
+    )
     parser.add_argument("--config", default=str(DEFAULT_CONFIG_PATH))
-    parser.add_argument("--smooth-n", type=int, default=None,
-                        help="Temporal smoothing window in frames.")
-    parser.add_argument("--frame-interval", type=int, default=None, metavar="MS",
-                        help="Target ms between frames in camera mode.")
-    parser.add_argument("--post-interval", type=float, default=None, metavar="SEC",
-                        help="Seconds between backend POSTs in camera mode.")
+    parser.add_argument(
+        "--smooth-n",
+        type=int,
+        default=None,
+        help="Temporal smoothing window in frames.",
+    )
+    parser.add_argument(
+        "--frame-interval",
+        type=int,
+        default=None,
+        metavar="MS",
+        help="Target milliseconds between frames in camera mode.",
+    )
+    parser.add_argument(
+        "--post-interval",
+        type=float,
+        default=None,
+        metavar="SEC",
+        help="Seconds between backend POSTs in camera mode.",
+    )
     parser.add_argument("--log-dir", default=None)
     parser.add_argument("--log-format", choices=["csv", "json"], default=None)
+    parser.add_argument(
+        "--stage2-threshold",
+        type=float,
+        default=None,
+        help="Occupied confidence threshold used by the edge classifier.",
+    )
     return parser.parse_args()
 
 
 def resolve_settings(args: argparse.Namespace, cfg: dict) -> argparse.Namespace:
     model_cfg = cfg.get("model", {})
     input_cfg = cfg.get("input", {})
-    post_cfg  = cfg.get("postprocess", {})
-    log_cfg   = cfg.get("logging", {})
+    post_cfg = cfg.get("postprocess", {})
+    log_cfg = cfg.get("logging", {})
+    stage1_cfg = cfg.get("stage1", {})
 
     if args.stage2_model is None:
         args.stage2_model = model_cfg.get("stage2_path", STAGE2_MODEL_DEFAULT)
     if args.stage1_model is None:
-        args.stage1_model = model_cfg.get("stage1_path", STAGE1_MODEL_DEFAULT)
+        args.stage1_model = stage1_cfg.get("detector_path", STAGE1_MODEL_DEFAULT)
     if args.device is None:
         args.device = model_cfg.get("device", "mps")
     if args.smooth_n is None:
@@ -116,61 +135,118 @@ def resolve_settings(args: argparse.Namespace, cfg: dict) -> argparse.Namespace:
     if args.frame_interval is None:
         args.frame_interval = input_cfg.get("frame_interval_ms", DEFAULT_FRAME_INTERVAL_MS)
     if args.post_interval is None:
-        args.post_interval = DEFAULT_POST_INTERVAL_S
+        args.post_interval = input_cfg.get("post_interval_s", DEFAULT_POST_INTERVAL_S)
     if args.log_dir is None:
         args.log_dir = log_cfg.get("output_dir", str(DEFAULT_LOG_DIR))
     if args.log_format is None:
         args.log_format = log_cfg.get("format", DEFAULT_LOG_FORMAT)
+    if args.stage2_threshold is None:
+        args.stage2_threshold = post_cfg.get(
+            "classifier_threshold", DEFAULT_STAGE2_THRESHOLD
+        )
     return args
 
 
-# ---------------------------------------------------------------------------
-# Temporal smoothing
-# ---------------------------------------------------------------------------
+def normalize_rois(raw_rois: dict | None) -> Dict[str, Tuple[int, int, int, int]]:
+    rois = raw_rois or DEFAULT_ROIS
+    normalized: Dict[str, Tuple[int, int, int, int]] = {}
+    for spot_id, coords in rois.items():
+        if not isinstance(coords, (list, tuple)) or len(coords) != 4:
+            raise ValueError(f"ROI for {spot_id!r} must be [x1, y1, x2, y2].")
+        x1, y1, x2, y2 = (int(v) for v in coords)
+        if x2 <= x1 or y2 <= y1:
+            raise ValueError(f"ROI for {spot_id!r} has invalid bounds: {coords}")
+        normalized[str(spot_id)] = (x1, y1, x2, y2)
+    return normalized
+
+
+def load_rois(config_path: Path) -> Dict[str, Tuple[int, int, int, int]]:
+    cfg = load_config(config_path)
+    return normalize_rois(cfg.get("rois"))
+
 
 class SmoothingBuffer:
-    """Per-spot majority-vote smoother. Ties resolve to free (safer default)."""
+    """Per-spot majority-vote smoothing over string statuses."""
 
     def __init__(self, window: int = DEFAULT_SMOOTH_N) -> None:
-        self._window = window
-        self._history: Dict[str, deque] = {}
+        self._window = max(1, int(window))
+        self._history: Dict[str, deque[str]] = {}
 
     def update(self, statuses: Dict[str, str]) -> None:
-        for sid, status in statuses.items():
-            if sid not in self._history:
-                self._history[sid] = deque(maxlen=self._window)
-            self._history[sid].append(status == "occupied")
+        for spot_id, status in statuses.items():
+            history = self._history.setdefault(spot_id, deque(maxlen=self._window))
+            history.append(status)
 
     def get_status(self) -> Dict[str, str]:
-        return {
-            sid: "occupied" if (hist and sum(hist) > len(hist) / 2) else "free"
-            for sid, hist in self._history.items()
-        }
+        smoothed: Dict[str, str] = {}
+        for spot_id, history in self._history.items():
+            occupied_count = sum(1 for status in history if status == "occupied")
+            smoothed[spot_id] = (
+                "occupied" if occupied_count > len(history) / 2 else "free"
+            )
+        return smoothed
 
     def reset(self) -> None:
-        for hist in self._history.values():
-            hist.clear()
+        for history in self._history.values():
+            history.clear()
 
-
-# ---------------------------------------------------------------------------
-# Two-stage inference
-# ---------------------------------------------------------------------------
 
 def get_spot_boxes(
     frame: np.ndarray,
+    fixed_rois: Dict[str, Tuple[int, int, int, int]],
     stage1_model: Optional[YOLO],
     device: str,
-    use_fixed_roi: bool,
+    use_stage1_detector: bool,
 ) -> Dict[str, Tuple[int, int, int, int]]:
-    """Stage 1: return (x1, y1, x2, y2) box per spot."""
-    if use_fixed_roi:
-        return FIXED_ROIS
+    if not use_stage1_detector:
+        return fixed_rois
+    if stage1_model is None:
+        raise ValueError("Stage 1 detector requested but no model was loaded.")
+
     results = stage1_model(frame, device=device, verbose=False)[0]
     boxes: Dict[str, Tuple[int, int, int, int]] = {}
-    for i, box in enumerate(results.boxes.xyxy.cpu().numpy()):
+    for index, box in enumerate(results.boxes.xyxy.cpu().numpy(), start=1):
         x1, y1, x2, y2 = box.astype(int)
-        boxes[f"spot_{i + 1}"] = (int(x1), int(y1), int(x2), int(y2))
+        if x2 <= x1 or y2 <= y1:
+            continue
+        boxes[f"spot_{index}"] = (int(x1), int(y1), int(x2), int(y2))
     return boxes
+
+
+def clip_box(
+    frame_shape: Tuple[int, int, int],
+    box: Tuple[int, int, int, int],
+) -> Optional[Tuple[int, int, int, int]]:
+    height, width = frame_shape[:2]
+    x1, y1, x2, y2 = box
+    x1 = max(0, min(width, x1))
+    x2 = max(0, min(width, x2))
+    y1 = max(0, min(height, y1))
+    y2 = max(0, min(height, y2))
+    if x2 <= x1 or y2 <= y1:
+        return None
+    return x1, y1, x2, y2
+
+
+def crop_patch(
+    frame: np.ndarray,
+    box: Tuple[int, int, int, int],
+) -> Optional[np.ndarray]:
+    clipped = clip_box(frame.shape, box)
+    if clipped is None:
+        return None
+    x1, y1, x2, y2 = clipped
+    patch = frame[y1:y2, x1:x2]
+    if patch.size == 0:
+        return None
+    return patch
+
+
+def _result_label_confidence(result: Any) -> Tuple[str, float]:
+    top1 = int(result.probs.top1)
+    label = str(result.names[top1])
+    confidence = float(result.probs.top1conf)
+    return label, confidence
 
 
 def classify_patch(
@@ -178,82 +254,121 @@ def classify_patch(
     box: Tuple[int, int, int, int],
     model: YOLO,
     device: str,
+    threshold: float,
 ) -> Tuple[str, float]:
-    """Stage 2: crop patch, classify as occupied or free."""
-    x1, y1, x2, y2 = box
-    patch = frame[y1:y2, x1:x2]
-    if patch.size == 0:
+    patch = crop_patch(frame, box)
+    if patch is None:
         return "free", 0.0
-    patch = cv2.resize(patch, (64, 64))
-    result = model(patch, device=device, verbose=False)[0]
-    label = result.names[result.probs.top1]
-    conf = float(result.probs.top1conf)
-    return label, conf
+    resized = cv2.resize(patch, (64, 64))
+    result = model(resized, device=device, verbose=False)[0]
+    label, confidence = _result_label_confidence(result)
+    status = "occupied" if label == "occupied" and confidence >= threshold else "free"
+    return status, confidence
 
 
 def build_payload(
-    smoothed: Dict[str, str],
+    statuses: Dict[str, str],
     confidences: Dict[str, float],
 ) -> Dict[str, Any]:
-    payload: Dict[str, Any] = dict(smoothed)
-    payload["confidence"] = {k: round(v, 3) for k, v in confidences.items()}
-    payload["timestamp"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    return payload
+    return {
+        "spots": dict(sorted(statuses.items())),
+        "confidence": {k: round(v, 3) for k, v in sorted(confidences.items())},
+        "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
 
 
 def annotate_frame(
     frame: np.ndarray,
-    smoothed: Dict[str, str],
+    statuses: Dict[str, str],
     spot_boxes: Dict[str, Tuple[int, int, int, int]],
     confidences: Dict[str, float],
 ) -> np.ndarray:
-    out = frame.copy()
-    for spot_id, status in smoothed.items():
-        box = spot_boxes.get(spot_id)
+    annotated = frame.copy()
+    for spot_id, status in statuses.items():
+        box = clip_box(frame.shape, spot_boxes.get(spot_id, (0, 0, 0, 0)))
         if box is None:
             continue
         x1, y1, x2, y2 = box
         color = (0, 0, 200) if status == "occupied" else (0, 180, 0)
-        cv2.rectangle(out, (x1, y1), (x2, y2), color, 2)
-        conf = confidences.get(spot_id, 0.0)
-        text = f"{spot_id}: {status} ({conf:.2f})"
-        cv2.putText(out, text, (x1, max(y1 - 6, 12)),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 1, cv2.LINE_AA)
-    return out
+        confidence = confidences.get(spot_id, 0.0)
+        cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 2)
+        cv2.putText(
+            annotated,
+            f"{spot_id}: {status} ({confidence:.2f})",
+            (x1, max(12, y1 - 6)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.45,
+            color,
+            1,
+            cv2.LINE_AA,
+        )
+    return annotated
 
-
-# ---------------------------------------------------------------------------
-# Logging
-# ---------------------------------------------------------------------------
 
 def log_result(payload: Dict[str, Any], log_dir: Path, log_format: str) -> None:
-    log_dir = Path(log_dir)
     log_dir.mkdir(parents=True, exist_ok=True)
-    date_str = datetime.now().strftime("%Y-%m-%d")
-    log_path = log_dir / f"parking_log_{date_str}.{log_format}"
-
+    log_path = log_dir / f"parking_log_{datetime.now().strftime('%Y-%m-%d')}.{log_format}"
     if log_format == "json":
-        with open(log_path, "a") as f:
+        with open(log_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(payload) + "\n")
-    else:
-        spot_keys = sorted(
-            k for k in payload if k not in {"confidence", "timestamp"}
+        return
+
+    fieldnames = ["timestamp", *payload["spots"].keys()]
+    write_header = not log_path.exists()
+    row = {"timestamp": payload["timestamp"], **payload["spots"]}
+    with open(log_path, "a", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        if write_header:
+            writer.writeheader()
+        writer.writerow(row)
+
+
+def post_payload(payload: Dict[str, Any], backend_url: str) -> None:
+    response = requests.post(backend_url, json=payload, timeout=5)
+    response.raise_for_status()
+
+
+def run_pipeline(
+    frame: np.ndarray,
+    fixed_rois: Dict[str, Tuple[int, int, int, int]],
+    stage1_model: Optional[YOLO],
+    stage2_model: YOLO,
+    smooth_buf: SmoothingBuffer,
+    args: argparse.Namespace,
+) -> Tuple[Dict[str, Any], Dict[str, Tuple[int, int, int, int]]]:
+    spot_boxes = get_spot_boxes(
+        frame=frame,
+        fixed_rois=fixed_rois,
+        stage1_model=stage1_model,
+        device=args.device,
+        use_stage1_detector=args.stage1_detector,
+    )
+
+    raw_statuses: Dict[str, str] = {}
+    confidences: Dict[str, float] = {}
+    for spot_id, box in sorted(spot_boxes.items()):
+        status, confidence = classify_patch(
+            frame=frame,
+            box=box,
+            model=stage2_model,
+            device=args.device,
+            threshold=args.stage2_threshold,
         )
-        fieldnames = spot_keys + ["timestamp"]
-        write_header = not log_path.exists()
-        with open(log_path, "a", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
-            if write_header:
-                writer.writeheader()
-            row = {k: payload[k] for k in fieldnames if k in payload}
-            writer.writerow(row)
+        raw_statuses[spot_id] = status
+        confidences[spot_id] = confidence
+
+    smooth_buf.update(raw_statuses)
+    payload = build_payload(smooth_buf.get_status(), confidences)
+    return payload, spot_boxes
 
 
-# ---------------------------------------------------------------------------
-# Inference modes
-# ---------------------------------------------------------------------------
+def create_models(args: argparse.Namespace) -> Tuple[Optional[YOLO], YOLO]:
+    stage1_model = YOLO(args.stage1_model) if args.stage1_detector else None
+    stage2_model = YOLO(args.stage2_model)
+    return stage1_model, stage2_model
 
-def run_inference(args: argparse.Namespace) -> int:
+
+def run_inference(args: argparse.Namespace, fixed_rois: Dict[str, Tuple[int, int, int, int]]) -> int:
     image_path = Path(args.image)
     if not image_path.exists():
         raise FileNotFoundError(f"Image not found: {image_path}")
@@ -262,102 +377,61 @@ def run_inference(args: argparse.Namespace) -> int:
     if frame is None:
         raise ValueError(f"OpenCV could not read image: {image_path}")
 
-    use_fixed = not args.no_fixed_roi
-    stage1 = None if use_fixed else YOLO(args.stage1_model)
-    stage2 = YOLO(args.stage2_model)
+    stage1_model, stage2_model = create_models(args)
     smooth_buf = SmoothingBuffer(window=args.smooth_n)
-
-    spot_boxes = get_spot_boxes(frame, stage1, args.device, use_fixed)
-
-    raw_statuses: Dict[str, str] = {}
-    confidences:  Dict[str, float] = {}
-    for spot_id, box in spot_boxes.items():
-        label, conf = classify_patch(frame, box, stage2, args.device)
-        raw_statuses[spot_id] = "occupied" if label == "occupied" else "free"
-        confidences[spot_id] = conf
-
-    smooth_buf.update(raw_statuses)
-    smoothed = smooth_buf.get_status()
-    payload = build_payload(smoothed, confidences)
+    payload, spot_boxes = run_pipeline(frame, fixed_rois, stage1_model, stage2_model, smooth_buf, args)
 
     print(json.dumps(payload, indent=2))
     log_result(payload, Path(args.log_dir), args.log_format)
 
     if args.save_annotated:
-        out_path = Path(args.save_annotated)
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        annotated = annotate_frame(frame, smoothed, spot_boxes, confidences)
-        cv2.imwrite(str(out_path), annotated)
-        print(f"Annotated image saved to: {out_path}")
+        output_path = Path(args.save_annotated)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        cv2.imwrite(str(output_path), annotate_frame(frame, payload["spots"], spot_boxes, payload["confidence"]))
 
     if args.post:
         try:
-            r = requests.post(args.backend_url, json=payload, timeout=5)
-            print(f"Backend: {r.text}")
-            r.raise_for_status()
+            post_payload(payload, args.backend_url)
         except requests.RequestException as exc:
             print(f"Backend POST failed: {exc}")
-
     return 0
 
 
-def run_camera(args: argparse.Namespace) -> int:
-    use_fixed = not args.no_fixed_roi
-    stage1 = None if use_fixed else YOLO(args.stage1_model)
-    stage2 = YOLO(args.stage2_model)
+def run_camera(args: argparse.Namespace, fixed_rois: Dict[str, Tuple[int, int, int, int]]) -> int:
+    stage1_model, stage2_model = create_models(args)
     smooth_buf = SmoothingBuffer(window=args.smooth_n)
-
     cap = cv2.VideoCapture(args.camera)
     if not cap.isOpened():
         raise RuntimeError(f"Cannot open camera index {args.camera}")
 
-    print(f"Camera {args.camera} opened. Press Ctrl-C to stop.")
-    last_post = time.perf_counter()
-
+    last_post = time.perf_counter() - args.post_interval
     try:
         while True:
-            ret, frame = cap.read()
-            if not ret:
-                print("Camera read failed — stopping.")
+            ok, frame = cap.read()
+            if not ok:
+                print("Camera read failed; stopping.")
                 break
 
-            t0 = time.perf_counter()
-            spot_boxes = get_spot_boxes(frame, stage1, args.device, use_fixed)
+            started_at = time.perf_counter()
+            payload, _ = run_pipeline(frame, fixed_rois, stage1_model, stage2_model, smooth_buf, args)
 
-            raw_statuses: Dict[str, str] = {}
-            confidences:  Dict[str, float] = {}
-            for spot_id, box in spot_boxes.items():
-                label, conf = classify_patch(frame, box, stage2, args.device)
-                raw_statuses[spot_id] = "occupied" if label == "occupied" else "free"
-                confidences[spot_id] = conf
-
-            smooth_buf.update(raw_statuses)
-            elapsed = time.perf_counter() - t0
-
-            now = time.perf_counter()
-            if now - last_post >= args.post_interval:
-                smoothed = smooth_buf.get_status()
-                payload = build_payload(smoothed, confidences)
+            if time.perf_counter() - last_post >= args.post_interval:
                 print(json.dumps(payload))
                 log_result(payload, Path(args.log_dir), args.log_format)
-
                 if args.post:
                     try:
-                        requests.post(args.backend_url, json=payload, timeout=2)
+                        post_payload(payload, args.backend_url)
                     except requests.RequestException as exc:
                         print(f"Backend POST failed: {exc}")
+                last_post = time.perf_counter()
 
-                last_post = now
-
-            sleep_s = max(0.0, args.frame_interval / 1000.0 - elapsed)
-            if sleep_s > 0:
-                time.sleep(sleep_s)
-
+            sleep_seconds = max(0.0, args.frame_interval / 1000.0 - (time.perf_counter() - started_at))
+            if sleep_seconds:
+                time.sleep(sleep_seconds)
     except KeyboardInterrupt:
         print("\nStopped by user.")
     finally:
         cap.release()
-
     return 0
 
 
@@ -365,15 +439,11 @@ def main() -> None:
     args = parse_args()
     cfg = load_config(Path(args.config))
     args = resolve_settings(args, cfg)
+    fixed_rois = normalize_rois(cfg.get("rois"))
 
     if args.camera is not None:
-        raise SystemExit(run_camera(args))
-    else:
-        if args.image is None:
-            import sys
-            print("error: one of --image or --camera is required", file=sys.stderr)
-            raise SystemExit(2)
-        raise SystemExit(run_inference(args))
+        raise SystemExit(run_camera(args, fixed_rois))
+    raise SystemExit(run_inference(args, fixed_rois))
 
 
 if __name__ == "__main__":
