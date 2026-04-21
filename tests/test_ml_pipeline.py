@@ -1,9 +1,11 @@
 import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from PIL import Image
+import torch
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -174,3 +176,36 @@ def test_train_stage2_accuracy_defaults(monkeypatch, tmp_path):
     assert defaults["patience"] == train.STAGE2_PATIENCE
     assert defaults["dropout"] == 0.1
     assert defaults["cos_lr"] is True
+
+
+def test_existing_checkpoint_prefers_best_then_last(tmp_path):
+    best_ckpt, last_ckpt = train._checkpoint_paths(str(tmp_path / "runs"), "exp")
+    last_ckpt.parent.mkdir(parents=True, exist_ok=True)
+
+    assert train._existing_checkpoint(best_ckpt, last_ckpt) is None
+
+    last_ckpt.write_bytes(b"last")
+    assert train._existing_checkpoint(best_ckpt, last_ckpt) == last_ckpt
+
+    best_ckpt.write_bytes(b"best")
+    assert train._existing_checkpoint(best_ckpt, last_ckpt) == best_ckpt
+
+
+def test_nan_recovery_patch_raises_clear_error_when_last_missing(tmp_path):
+    train._patch_ultralytics_trainer_for_nan_checkpoints()
+
+    fake_trainer = SimpleNamespace(
+        loss=torch.tensor(float("nan")),
+        fitness=float("nan"),
+        best_fitness=0.0,
+        start_epoch=0,
+        last=tmp_path / "weights" / "last.pt",
+        nan_recovery_attempts=0,
+    )
+
+    with pytest.raises(RuntimeError) as exc:
+        train.BaseTrainer._handle_nan_recovery(fake_trainer, epoch=0)
+
+    message = str(exc.value)
+    assert "before a recoverable checkpoint was written" in message
+    assert str(fake_trainer.last) in message

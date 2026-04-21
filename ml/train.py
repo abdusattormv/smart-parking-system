@@ -17,10 +17,15 @@ import argparse
 import json
 import sys
 import time
+from copy import deepcopy
 from pathlib import Path
+import torch
 
 import ultralytics
 from ultralytics import YOLO
+from ultralytics.engine import trainer as ultralytics_trainer
+from ultralytics.engine.trainer import BaseTrainer
+from ultralytics.utils.tal import TaskAlignedAssigner
 
 STAGE1_YAML = "ml/stage1.yaml"
 STAGE2_DATA_DIR = "stage2_data"
@@ -89,6 +94,169 @@ def _check_version() -> None:
             f"[warn] ultralytics {ultralytics.__version__} detected; {required}+ recommended.",
             file=sys.stderr,
         )
+
+
+def _patch_ultralytics_assigner_for_iou_mismatch() -> None:
+    """Patch TaskAlignedAssigner.get_box_metrics to avoid MPS boolean-index shape divergence."""
+    if getattr(TaskAlignedAssigner, "_smart_parking_iou_patch", False):
+        return
+
+    def _get_box_metrics_safe(self, pd_scores, pd_bboxes, gt_labels, gt_bboxes, mask_gt):
+        na = pd_bboxes.shape[-2]
+        mask_gt = mask_gt.bool()  # b, max_num_obj, h*w
+        overlaps = torch.zeros([self.bs, self.n_max_boxes, na], dtype=pd_bboxes.dtype, device=pd_bboxes.device)
+        bbox_scores = torch.zeros([self.bs, self.n_max_boxes, na], dtype=pd_scores.dtype, device=pd_scores.device)
+
+        mask_idx = mask_gt.nonzero(as_tuple=True)
+        num_pairs = mask_idx[0].numel()
+        if num_pairs:
+            cls_idx = gt_labels.squeeze(-1).long().clamp_(0, pd_scores.shape[-1] - 1)
+            cls_scores = pd_scores.permute(0, 2, 1).gather(1, cls_idx.unsqueeze(-1).expand(-1, -1, na))
+            bbox_scores[mask_idx] = cls_scores[mask_idx]
+            pd_boxes_all = pd_bboxes.unsqueeze(1).expand(-1, self.n_max_boxes, -1, -1)
+            gt_boxes_all = gt_bboxes.unsqueeze(2).expand(-1, -1, na, -1)
+            pd_boxes = pd_boxes_all[mask_idx]
+            gt_boxes = gt_boxes_all[mask_idx]
+
+            n = min(pd_boxes.shape[0], gt_boxes.shape[0], num_pairs)
+            if n != num_pairs:
+                print(
+                    f"[patch] aligning IoU pair count from {num_pairs} to {n} to avoid tensor mismatch.",
+                    file=sys.stderr,
+                )
+            if n:
+                overlaps_vals = self.iou_calculation(gt_boxes[:n], pd_boxes[:n])
+                overlaps[mask_idx[0][:n], mask_idx[1][:n], mask_idx[2][:n]] = overlaps_vals
+
+        align_metric = bbox_scores.pow(self.alpha) * overlaps.pow(self.beta)
+        return align_metric, overlaps
+
+    TaskAlignedAssigner.get_box_metrics = _get_box_metrics_safe
+    TaskAlignedAssigner._smart_parking_iou_patch = True
+
+
+def _state_dict_is_finite(state_dict: dict[str, object]) -> bool:
+    return all(
+        torch.isfinite(value).all()
+        for value in state_dict.values()
+        if isinstance(value, torch.Tensor)
+    )
+
+
+def _checkpoint_paths(project_dir: str, run_name: str) -> tuple[Path, Path]:
+    weights_dir = Path(project_dir) / run_name / "weights"
+    return weights_dir / "best.pt", weights_dir / "last.pt"
+
+
+def _existing_checkpoint(best_ckpt: Path, last_ckpt: Path) -> Path | None:
+    if best_ckpt.exists():
+        return best_ckpt
+    if last_ckpt.exists():
+        return last_ckpt
+    return None
+
+
+def _patch_ultralytics_trainer_for_nan_checkpoints() -> None:
+    """Patch trainer checkpoint handling so NaN recovery does not cascade into missing-last.pt failures."""
+    if getattr(BaseTrainer, "_smart_parking_nan_patch", False):
+        return
+
+    def _save_model_safe(self):
+        import io
+        from datetime import datetime
+
+        ema = deepcopy(ultralytics_trainer.unwrap_model(self.ema.ema)).half()
+        used_model_fallback = False
+        if not _state_dict_is_finite(ema.state_dict()):
+            model_snapshot = deepcopy(ultralytics_trainer.unwrap_model(self.model)).half()
+            if not _state_dict_is_finite(model_snapshot.state_dict()):
+                ultralytics_trainer.LOGGER.warning(
+                    f"Skipping checkpoint save at epoch {self.epoch}: EMA and model contain NaN/Inf"
+                )
+                return False
+            ultralytics_trainer.LOGGER.warning(
+                f"EMA contains NaN/Inf at epoch {self.epoch}; saving fallback checkpoint from current model weights."
+            )
+            ema = model_snapshot
+            used_model_fallback = True
+
+        buffer = io.BytesIO()
+        torch.save(
+            {
+                "epoch": self.epoch,
+                "best_fitness": self.best_fitness,
+                "model": None,
+                "ema": ema,
+                "updates": self.ema.updates,
+                "optimizer": ultralytics_trainer.convert_optimizer_state_dict_to_fp16(deepcopy(self.optimizer.state_dict())),
+                "scaler": self.scaler.state_dict(),
+                "train_args": vars(self.args),
+                "train_metrics": {
+                    **self.metrics,
+                    **{"fitness": self.fitness, "ema_fallback_to_model": used_model_fallback},
+                },
+                "train_results": self.read_results_csv(),
+                "date": datetime.now().isoformat(),
+                "version": ultralytics_trainer.__version__,
+                "git": {
+                    "root": str(ultralytics_trainer.GIT.root),
+                    "branch": ultralytics_trainer.GIT.branch,
+                    "commit": ultralytics_trainer.GIT.commit,
+                    "origin": ultralytics_trainer.GIT.origin,
+                },
+                "license": "AGPL-3.0 (https://ultralytics.com/license)",
+                "docs": "https://docs.ultralytics.com",
+            },
+            buffer,
+        )
+        serialized_ckpt = buffer.getvalue()
+
+        self.wdir.mkdir(parents=True, exist_ok=True)
+        self.last.write_bytes(serialized_ckpt)
+        if self.best_fitness == self.fitness:
+            self.best.write_bytes(serialized_ckpt)
+        if (self.save_period > 0) and (self.epoch % self.save_period == 0):
+            (self.wdir / f"epoch{self.epoch}.pt").write_bytes(serialized_ckpt)
+        return True
+
+    def _handle_nan_recovery_safe(self, epoch):
+        loss_nan = self.loss is not None and not self.loss.isfinite()
+        fitness_nan = self.fitness is not None and not ultralytics_trainer.np.isfinite(self.fitness)
+        fitness_collapse = self.best_fitness and self.best_fitness > 0 and self.fitness == 0
+        corrupted = ultralytics_trainer.RANK in {-1, 0} and loss_nan and (fitness_nan or fitness_collapse)
+        reason = "Loss NaN/Inf" if loss_nan else "Fitness NaN/Inf" if fitness_nan else "Fitness collapse"
+        if ultralytics_trainer.RANK != -1:
+            broadcast_list = [corrupted if ultralytics_trainer.RANK == 0 else None]
+            ultralytics_trainer.dist.broadcast_object_list(broadcast_list, 0)
+            corrupted = broadcast_list[0]
+        if not corrupted:
+            return False
+        if not self.last.exists():
+            raise RuntimeError(
+                f"{reason} detected before a recoverable checkpoint was written at {self.last}. "
+                "Training aborted because continuing would only cascade into a missing-checkpoint failure. "
+                "Reduce augmentation or learning rate and retry."
+            )
+        self.nan_recovery_attempts += 1
+        if self.nan_recovery_attempts > 3:
+            raise RuntimeError(f"Training failed: NaN persisted for {self.nan_recovery_attempts} epochs")
+        ultralytics_trainer.LOGGER.warning(
+            f"{reason} detected (attempt {self.nan_recovery_attempts}/3), recovering from last.pt..."
+        )
+        self._model_train()
+        _, ckpt = ultralytics_trainer.load_checkpoint(self.last)
+        ema_state = ckpt["ema"].float().state_dict()
+        if not _state_dict_is_finite(ema_state):
+            raise RuntimeError(f"Checkpoint {self.last} is corrupted with NaN/Inf weights")
+        ultralytics_trainer.unwrap_model(self.model).load_state_dict(ema_state)
+        self._load_checkpoint_state(ckpt)
+        del ckpt, ema_state
+        self.scheduler.last_epoch = epoch - 1
+        return True
+
+    BaseTrainer.save_model = _save_model_safe
+    BaseTrainer._handle_nan_recovery = _handle_nan_recovery_safe
+    BaseTrainer._smart_parking_nan_patch = True
 
 
 def _train_with_fallback(model: YOLO, kwargs: dict, args: argparse.Namespace):
@@ -204,6 +372,8 @@ def extract_metrics(task: str, results) -> dict[str, object]:
 def main() -> None:
     args = parse_args()
     _check_version()
+    _patch_ultralytics_assigner_for_iou_mismatch()
+    _patch_ultralytics_trainer_for_nan_checkpoints()
     defaults = task_defaults(args)
 
     print(f"Task   : {defaults['task']}")
@@ -245,7 +415,8 @@ def main() -> None:
     results = _train_with_fallback(model, train_kwargs, args)
     elapsed = time.perf_counter() - started_at
 
-    best_ckpt = Path(defaults["project_dir"]) / defaults["run_name"] / "weights" / "best.pt"
+    best_ckpt, last_ckpt = _checkpoint_paths(defaults["project_dir"], defaults["run_name"])
+    selected_ckpt = _existing_checkpoint(best_ckpt, last_ckpt)
     metric_report = extract_metrics(defaults["task"], results)
     report = {
         "task": defaults["task"],
@@ -270,11 +441,18 @@ def main() -> None:
         },
         "train_time_s": round(elapsed, 2),
         "best_ckpt": str(best_ckpt),
+        "last_ckpt": str(last_ckpt),
+        "selected_ckpt": str(selected_ckpt) if selected_ckpt else None,
         **metric_report,
     }
 
     print(f"\nTraining complete ({elapsed:.0f}s)")
     print(f"Best checkpoint : {best_ckpt}")
+    print(f"Last checkpoint : {last_ckpt}")
+    if selected_ckpt:
+        print(f"Selected ckpt  : {selected_ckpt}")
+    else:
+        print("Selected ckpt  : none written")
     if defaults["task"] == "classify":
         print(f"Top-1 accuracy : {metric_report.get('top1_accuracy')}")
         print(f"Top-5 accuracy : {metric_report.get('top5_accuracy')}")
