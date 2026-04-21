@@ -10,6 +10,10 @@ The deployed demo still supports fixed ROIs for a static camera, but the recomme
 
 Stage 1 full-frame slot detection is the primary generalization track. Stage 2 patch classification remains the occupancy model. The single-model full-frame occupancy detector remains only as an ML comparison baseline.
 
+The final-project default is now:
+
+`trained Stage 1 detector -> per-slot crop -> trained Stage 2 classifier -> smoothing -> JSON -> FastAPI`
+
 ## Repo Focus
 
 - `edge/` runs the two-stage edge pipeline and emits the v3 payload contract
@@ -89,6 +93,12 @@ python ml/train.py --stage2 --variant s --device mps
 python ml/train.py --stage2 --variant m --device mps
 ```
 
+Generate a final artifact summary after training and evaluation:
+
+```bash
+python ml/finalize.py
+```
+
 Accuracy notes:
 
 - the saved `runs/stage2_cls/yolov8n_stage2/results.csv` shows an early accuracy collapse after epoch 4, so the repo now uses a lower Stage 2 learning rate, longer patience, cosine LR decay, and classifier dropout by default
@@ -133,6 +143,41 @@ python edge/detect.py \
   --stage2-model runs/stage2_cls/yolov8n_stage2/weights/best.pt \
   --post \
   --save-annotated logs/demo-annotated.jpg
+```
+
+Run the integrated final pipeline with the trained Stage 1 detector:
+
+```bash
+python edge/detect.py \
+  --image samples/demo.jpg \
+  --stage1-detector \
+  --stage1-model runs/stage1_det/yolov8s_stage1/weights/best.pt \
+  --stage2-model runs/stage2_cls/yolov8s_stage2/weights/best.pt \
+  --post \
+  --save-annotated logs/final-demo-annotated.jpg
+```
+
+Benchmark the Stage 2 classifier on a representative ROI patch:
+
+```bash
+python edge/benchmark.py \
+  --task classify \
+  --image samples/demo.jpg \
+  --model runs/stage2_cls/yolov8s_stage2/weights/best.pt \
+  --imgsz 64 \
+  --roi 50 100 200 250
+```
+
+Run the timed stability test:
+
+```bash
+python edge/stability_test.py \
+  --image samples/demo.jpg \
+  --stage1-detector \
+  --stage1-model runs/stage1_det/yolov8s_stage1/weights/best.pt \
+  --stage2-model runs/stage2_cls/yolov8s_stage2/weights/best.pt \
+  --post \
+  --duration 1800
 ```
 
 Run live camera inference:

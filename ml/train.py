@@ -28,7 +28,7 @@ from ultralytics.engine.trainer import BaseTrainer
 from ultralytics.utils.tal import TaskAlignedAssigner
 
 STAGE1_YAML = "ml/stage1.yaml"
-STAGE2_DATA_DIR = "stage2_data"
+STAGE2_DATA_DIR = "datasets/stage2_data"
 SINGLE_MODEL_YAML = "ml/single_model.yaml"
 
 STAGE1_EPOCHS = 60
