@@ -296,9 +296,9 @@ def annotate_frame(
         if box is None:
             continue
         x1, y1, x2, y2 = box
-        color = (0, 0, 200) if status == "occupied" else (0, 180, 0)
+        color = (255, 0, 255) if status == "occupied" else (47, 255, 173)
         confidence = confidences.get(spot_id, 0.0)
-        cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 2)
+        cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 1)
         cv2.putText(
             annotated,
             f"{spot_id}: {status} ({confidence:.2f})",

@@ -22,7 +22,7 @@ DEFAULT_STAGE2_IMGSZ = 64
 DEFAULT_DETECT_IMGSZ = 640
 DEFAULT_CONF = 0.25
 REFERENCE_COLORS = {
-    "free": (0, 255, 255),
+    "free": (47, 255, 173),
     "occupied": (255, 0, 255),
 }
 
@@ -130,7 +130,7 @@ def save_reference_style(result: Any, output_path: Path) -> None:
         x1, y1, x2, y2 = [int(round(float(value))) for value in box]
         label = names.get(int(cls_id), str(int(cls_id)))
         color = _reference_color(label)
-        cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 2)
+        cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 1)
 
         text = f"{int(round(float(conf) * 100.0))}%"
         font = cv2.FONT_HERSHEY_SIMPLEX

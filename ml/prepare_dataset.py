@@ -35,10 +35,10 @@ _TIMESTAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}_\d{2}_\d{2}_\d{2}_jpg$")
 _PARKING_LOT_RE = re.compile(r"^(parking_lot_\d+)_mp4-(\d+)_jpg$")
 _TINY_BOX_AREA = 0.0025
 
-STAGE1_DATA_DIR = "stage1_data"
+STAGE1_DATA_DIR = "datasets/stage1_data"
 STAGE1_YAML = "ml/stage1.yaml"
-STAGE2_DATA_DIR = "stage2_data"
-SINGLE_MODEL_DATA_DIR = "single_model_data"
+STAGE2_DATA_DIR = "datasets/stage2_data"
+SINGLE_MODEL_DATA_DIR = "datasets/single_model_data"
 SINGLE_MODEL_YAML = "ml/single_model.yaml"
 PKLOT_TEST_DIR = "pklot_test"
 CNRPARK_TEST_DIR = "cnrpark_test"
