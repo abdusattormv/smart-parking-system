@@ -101,7 +101,10 @@ def test_prepare_single_model_detection_preserves_two_classes(tmp_path):
 
     assert (out_dir / "train" / "images" / "sample.jpg").exists()
     labels = (out_dir / "train" / "labels" / "sample.txt").read_text(encoding="utf-8").splitlines()
-    assert labels == ["0 0.5 0.5 0.4 0.4", "1 0.2 0.2 0.1 0.1"]
+    assert labels == [
+        "0 0.500000 0.500000 0.400000 0.400000",
+        "1 0.200000 0.200000 0.100000 0.100000",
+    ]
     yaml_text = yaml_path.read_text(encoding="utf-8")
     assert "names:" in yaml_text
     assert "- free" in yaml_text
@@ -109,6 +112,60 @@ def test_prepare_single_model_detection_preserves_two_classes(tmp_path):
     report = json.loads((out_dir / prepare_dataset.DETECTION_REPORT).read_text(encoding="utf-8"))
     assert report["track"] == "single_model"
     assert report["splits"]["train"]["empty_label_frames_excluded"] == 0
+
+
+def test_iter_detection_boxes_converts_polygon_to_clipped_box(tmp_path):
+    label = tmp_path / "sample.txt"
+    make_label(
+        label,
+        [
+            "1 0.10 0.20 0.40 0.20 0.45 0.60 0.05 0.70",
+            "0 1.10 0.50 0.40 0.40",
+        ],
+    )
+
+    rows = list(prepare_dataset.iter_detection_boxes(label))
+
+    assert rows[0][0] == 1
+    assert rows[0][1] == pytest.approx((0.25, 0.45, 0.4, 0.5))
+    assert rows[0][2] == "polygon"
+    assert rows[1][0] == 0
+    assert rows[1][1] == pytest.approx((0.95, 0.5, 0.1, 0.4))
+    assert rows[1][2] == "box"
+
+
+def test_prepare_single_model_detection_converts_polygon_labels(tmp_path):
+    root = tmp_path / "pklot"
+    make_image(root / "train" / "images" / "sample.jpg", 20)
+    make_label(
+        root / "train" / "labels" / "sample.txt",
+        [
+            "0 0.10 0.20 0.40 0.20 0.40 0.60 0.10 0.60",
+            "1 0.50 0.50 0.70 0.50 0.70 0.90 0.50 0.90",
+        ],
+    )
+    make_image(root / "valid" / "images" / "sample.jpg", 20)
+    make_label(
+        root / "valid" / "labels" / "sample.txt",
+        ["1 0.50 0.50 0.70 0.50 0.70 0.90 0.50 0.90"],
+    )
+    make_image(root / "test" / "images" / "sample.jpg", 20)
+    make_label(
+        root / "test" / "labels" / "sample.txt",
+        ["0 0.10 0.20 0.40 0.20 0.40 0.60 0.10 0.60"],
+    )
+
+    out_dir = tmp_path / "single_model_data"
+    yaml_path = tmp_path / "single_model.yaml"
+    prepare_dataset.prepare_single_model_detection(root, out_dir, yaml_path)
+
+    labels = (out_dir / "train" / "labels" / "sample.txt").read_text(encoding="utf-8").splitlines()
+    assert labels == [
+        "0 0.250000 0.400000 0.300000 0.400000",
+        "1 0.600000 0.700000 0.200000 0.400000",
+    ]
+    report = json.loads((out_dir / prepare_dataset.DETECTION_REPORT).read_text(encoding="utf-8"))
+    assert report["splits"]["train"]["polygon_labels_converted"] == 2
 
 
 def test_prepare_stage1_excludes_empty_label_frames(tmp_path):
@@ -131,6 +188,21 @@ def test_prepare_stage1_excludes_empty_label_frames(tmp_path):
     report = json.loads((out_dir / prepare_dataset.DETECTION_REPORT).read_text(encoding="utf-8"))
     assert report["track"] == "stage1"
     assert report["splits"]["train"]["empty_label_frames_excluded"] == 1
+
+
+def test_collect_roboflow_patches_uses_polygon_boxes(tmp_path):
+    root = tmp_path / "pklot"
+    make_image(root / "train" / "images" / "sample.jpg", 128)
+    make_label(
+        root / "train" / "labels" / "sample.txt",
+        ["1 0.25 0.25 0.50 0.25 0.50 0.75 0.25 0.75"],
+    )
+
+    patches = prepare_dataset.collect_roboflow_patches(root, tmp_path / "patches")
+
+    assert len(patches["occupied"]) == 1
+    with Image.open(patches["occupied"][0]) as patch:
+        assert patch.size == (8, 12)
 
 
 def test_train_requires_explicit_mode(monkeypatch):

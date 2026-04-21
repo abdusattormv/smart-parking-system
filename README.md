@@ -55,7 +55,11 @@ python ml/train.py --stage1 --variant n --device mps
 Single-model occupancy detector baseline:
 
 ```bash
-python ml/prepare_dataset.py --single-model --pklot-dir /path/to/pklot_roboflow
+python ml/prepare_dataset.py --single-model \
+  --pklot-dir datasets/pklot_v4 \
+  --single-model-output single_model_data_boxes \
+  --single-model-yaml ml/single_model_boxes.yaml
+
 python ml/train.py --single-model --variant n --device mps
 python ml/evaluate.py --single-model --weights runs/single_model_det/yolov8n_single_model/weights/best.pt --split val
 ```
@@ -81,6 +85,7 @@ Accuracy notes:
 
 - the saved `runs/stage2_cls/yolov8n_stage2/results.csv` shows an early accuracy collapse after epoch 4, so the repo now uses a lower Stage 2 learning rate, longer patience, cosine LR decay, and classifier dropout by default
 - PKLot full-frame exports include zero-label frames, so detection-style prep now excludes those frames and writes a detection dataset report under the output directory
+- Roboflow PKLot exports may use per-slot polygons; `ml/prepare_dataset.py` now converts those polygons into clipped YOLO detection boxes automatically for Stage 1, single-model detection, and Stage 2 patch cropping
 
 Evaluate Stage 2 classification:
 

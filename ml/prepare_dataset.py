@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import shutil
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -108,6 +109,55 @@ def _image_files(path: Path) -> list[Path]:
     for suffix in ("*.jpg", "*.jpeg", "*.png"):
         files.extend(sorted(path.glob(suffix)))
     return files
+
+
+def _clip_unit(value: float) -> float:
+    return min(1.0, max(0.0, value))
+
+
+def _xyxy_to_cxcywh(x1: float, y1: float, x2: float, y2: float) -> tuple[float, float, float, float] | None:
+    x1 = _clip_unit(x1)
+    y1 = _clip_unit(y1)
+    x2 = _clip_unit(x2)
+    y2 = _clip_unit(y2)
+    if x2 <= x1 or y2 <= y1:
+        return None
+    return ((x1 + x2) / 2.0, (y1 + y2) / 2.0, x2 - x1, y2 - y1)
+
+
+def _label_geometry_to_box(values: list[float]) -> tuple[float, float, float, float] | None:
+    if not values or any((not math.isfinite(value)) for value in values):
+        return None
+    if len(values) == 4:
+        cx, cy, bw, bh = values
+        return _xyxy_to_cxcywh(cx - bw / 2.0, cy - bh / 2.0, cx + bw / 2.0, cy + bh / 2.0)
+    if len(values) >= 6 and len(values) % 2 == 0:
+        xs = values[0::2]
+        ys = values[1::2]
+        return _xyxy_to_cxcywh(min(xs), min(ys), max(xs), max(ys))
+    return None
+
+
+def iter_detection_boxes(label_path: Path) -> Iterable[tuple[int, tuple[float, float, float, float], str]]:
+    for raw_line in label_path.read_text(encoding="utf-8").splitlines():
+        parts = raw_line.strip().split()
+        if len(parts) < 5:
+            continue
+        try:
+            class_id = int(float(parts[0]))
+            values = [float(value) for value in parts[1:]]
+        except ValueError:
+            continue
+        box = _label_geometry_to_box(values)
+        if box is None:
+            continue
+        source_kind = "box" if len(values) == 4 else "polygon"
+        yield class_id, box, source_kind
+
+
+def format_detection_box(class_id: int, box: tuple[float, float, float, float]) -> str:
+    cx, cy, bw, bh = box
+    return f"{class_id} {cx:.6f} {cy:.6f} {bw:.6f} {bh:.6f}"
 
 
 def validate_split_ratios(val_ratio: float, test_ratio: float) -> None:
@@ -286,20 +336,23 @@ def prepare_stage1(pklot_dir: Path, out_dir: Path, yaml_path: Path) -> None:
         split_boxes = 0
         kept_label_counts: list[int] = []
         skipped_empty = 0
+        polygon_labels_converted = 0
         for image_path in _image_files(image_dir):
             label_path = label_dir / f"{image_path.stem}.txt"
             if not label_path.exists():
                 continue
             remapped = []
-            for line in label_path.read_text().splitlines():
-                parts = line.strip().split()
-                if len(parts) < 5:
-                    continue
-                remapped.append("0 " + " ".join(parts[1:]))
+            for _, box, source_kind in iter_detection_boxes(label_path):
+                remapped.append(format_detection_box(0, box))
+                if source_kind == "polygon":
+                    polygon_labels_converted += 1
                 split_boxes += 1
             if remapped:
                 shutil.copy2(image_path, out_image / image_path.name)
-                (out_label / f"{image_path.stem}.txt").write_text("\n".join(remapped) + "\n")
+                (out_label / f"{image_path.stem}.txt").write_text(
+                    "\n".join(remapped) + "\n",
+                    encoding="utf-8",
+                )
                 split_images += 1
                 kept_label_counts.append(len(remapped))
             else:
@@ -308,6 +361,7 @@ def prepare_stage1(pklot_dir: Path, out_dir: Path, yaml_path: Path) -> None:
         split_summary[split_name] = {
             "images_kept": split_images,
             "boxes_kept": split_boxes,
+            "polygon_labels_converted": polygon_labels_converted,
             "empty_label_frames_excluded": skipped_empty,
             "kept_label_count_summary": summarize_label_counts(kept_label_counts),
         }
@@ -365,31 +419,34 @@ def prepare_single_model_detection(pklot_dir: Path, out_dir: Path, yaml_path: Pa
         split_boxes = 0
         kept_label_counts: list[int] = []
         skipped_empty = 0
+        polygon_labels_converted = 0
         for image_path in _image_files(image_dir):
             label_path = label_dir / f"{image_path.stem}.txt"
             if not label_path.exists():
                 continue
             valid_lines = []
-            for line in label_path.read_text().splitlines():
-                parts = line.strip().split()
-                if len(parts) < 5:
-                    continue
-                class_id = int(parts[0])
+            for class_id, box, source_kind in iter_detection_boxes(label_path):
                 if class_id not in (_ROBOFLOW_FREE_IDS | _ROBOFLOW_OCC_IDS):
                     continue
-                valid_lines.append(line.strip())
+                valid_lines.append(format_detection_box(class_id, box))
+                if source_kind == "polygon":
+                    polygon_labels_converted += 1
                 split_boxes += 1
             if not valid_lines:
                 skipped_empty += 1
                 continue
             shutil.copy2(image_path, out_image / image_path.name)
-            (out_label / f"{image_path.stem}.txt").write_text("\n".join(valid_lines) + "\n")
+            (out_label / f"{image_path.stem}.txt").write_text(
+                "\n".join(valid_lines) + "\n",
+                encoding="utf-8",
+            )
             split_images += 1
             kept_label_counts.append(len(valid_lines))
         print(f"  {split_name:5s}: {split_images:5d} images  {split_boxes:7d} boxes")
         split_summary[split_name] = {
             "images_kept": split_images,
             "boxes_kept": split_boxes,
+            "polygon_labels_converted": polygon_labels_converted,
             "empty_label_frames_excluded": skipped_empty,
             "kept_label_count_summary": summarize_label_counts(kept_label_counts),
         }
@@ -439,12 +496,8 @@ def collect_roboflow_patches(root: Path, patch_output: Path) -> dict[str, list[P
                 continue
             with Image.open(image_path) as img:
                 width, height = img.size
-                for index, line in enumerate(label_path.read_text().splitlines()):
-                    parts = line.strip().split()
-                    if len(parts) < 5:
-                        continue
-                    class_id = int(parts[0])
-                    cx, cy, bw, bh = (float(value) for value in parts[1:5])
+                for index, (class_id, box, _) in enumerate(iter_detection_boxes(label_path)):
+                    cx, cy, bw, bh = box
                     x1 = max(0, int((cx - bw / 2) * width))
                     y1 = max(0, int((cy - bh / 2) * height))
                     x2 = min(width, int((cx + bw / 2) * width))
