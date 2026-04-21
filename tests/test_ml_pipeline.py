@@ -273,6 +273,51 @@ def test_prepare_stage2_inherits_scene_holdout(tmp_path):
     assert report["scene_holdout"]["leakage_checks"]["scene_leakage_detected"] is False
 
 
+def test_collect_cnrpark_patches_reads_official_labels_layout(tmp_path):
+    root = tmp_path / "cnr"
+    sunny_free = root / "PATCHES" / "SUNNY" / "2015-11-22" / "camera6" / "S_2015-11-22_09.47_C06_205.jpg"
+    rainy_busy = root / "PATCHES" / "RAINY" / "2015-11-23" / "camera1" / "R_2015-11-23_09.47_C01_099.jpg"
+    make_image(sunny_free, 90)
+    make_image(rainy_busy, 180)
+    make_label(
+        root / "LABELS" / "split.txt",
+        [
+            "PATCHES/SUNNY/2015-11-22/camera6/S_2015-11-22_09.47_C06_205.jpg 0",
+            "PATCHES/RAINY/2015-11-23/camera1/R_2015-11-23_09.47_C01_099.jpg 1",
+        ],
+    )
+
+    class_map, weather_map = prepare_dataset.collect_cnrpark_patches(root)
+
+    assert class_map["free"] == [sunny_free]
+    assert class_map["occupied"] == [rainy_busy]
+    assert weather_map["sunny"]["free"] == [sunny_free]
+    assert weather_map["rainy"]["occupied"] == [rainy_busy]
+
+
+def test_copy_weather_flat_writes_per_weather_layout(tmp_path):
+    src = tmp_path / "src"
+    sunny_free = src / "PATCHES" / "SUNNY" / "2015-11-22" / "camera6" / "a.jpg"
+    cloudy_occ = src / "PATCHES" / "OVERCAST" / "2015-11-22" / "camera6" / "b.jpg"
+    make_image(sunny_free, 80)
+    make_image(cloudy_occ, 120)
+
+    collisions = prepare_dataset.copy_weather_flat(
+        {
+            "sunny": {"free": [sunny_free], "occupied": []},
+            "cloudy": {"free": [], "occupied": [cloudy_occ]},
+            "rainy": {"free": [], "occupied": []},
+        },
+        tmp_path / "weather",
+        source_root=src,
+    )
+
+    assert collisions == {}
+    assert (tmp_path / "weather" / "sunny" / "free").glob("*.jpg")
+    assert len(list((tmp_path / "weather" / "sunny" / "free").glob("*.jpg"))) == 1
+    assert len(list((tmp_path / "weather" / "cloudy" / "occupied").glob("*.jpg"))) == 1
+
+
 def test_train_requires_explicit_mode(monkeypatch):
     monkeypatch.setattr(sys, "argv", ["train.py"])
     with pytest.raises(SystemExit) as exc:

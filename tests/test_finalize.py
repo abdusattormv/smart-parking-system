@@ -30,6 +30,11 @@ def test_required_artifact_checks_mark_missing_items(tmp_path):
     write_csv(logs / "stage2_evaluation.csv", "model,top1_accuracy", "best,0.97")
 
     manifest = {
+        "datasets": {
+            "pklot_test": {"present": True},
+            "cnrpark_test": {"present": False},
+            "stage2_weather": {"present": False},
+        },
         "checkpoints": {
             "stage1_s": {"present": False},
             "stage1_m": {"present": True},
@@ -44,6 +49,8 @@ def test_required_artifact_checks_mark_missing_items(tmp_path):
             "stage2_evaluation": {"top1_accuracy": "0.97"},
             "stage2_model_comparison": None,
             "stage2_threshold_sweep": None,
+            "stage2_cross_dataset": None,
+            "stage2_per_weather": None,
             "benchmark_results": None,
             "bandwidth_report_present": False,
             "stability_summary": None,
@@ -56,6 +63,8 @@ def test_required_artifact_checks_mark_missing_items(tmp_path):
     assert checks["stage2_n_checkpoint"] is True
     assert checks["stage2_s_checkpoint"] is False
     assert checks["stage2_eval_table"] is True
+    assert checks["cross_dataset_eval"] is False
+    assert checks["per_weather_eval"] is True
     assert checks["benchmark_results"] is False
 
 
@@ -64,6 +73,7 @@ def test_write_markdown_emits_summary_file(tmp_path):
         "datasets": {
             "stage1": {"splits": {"train": {"images_kept": 1, "boxes_kept": 2, "scene_count": 3}}},
             "stage2": {"splits": {"val": {"free": 4, "occupied": 5}}},
+            "stage2_weather": {"present": True, "splits": {"sunny": {"free": 2, "occupied": 3}}},
             "pklot_test": {"present": True, "free": 6, "occupied": 7},
             "cnrpark_test": {"present": False},
         },
@@ -81,6 +91,8 @@ def test_write_markdown_emits_summary_file(tmp_path):
             "stage2_evaluation": {"top1_accuracy": "0.98"},
             "stage2_model_comparison": {"model": "yolov8s_stage2"},
             "stage2_threshold_sweep": {"threshold": "0.55"},
+            "stage2_cross_dataset": {"dataset": "pklot_test"},
+            "stage2_per_weather": {"dataset": "sunny"},
         },
         "checks": {"stage1_detector_checkpoint": True},
     }
@@ -91,4 +103,5 @@ def test_write_markdown_emits_summary_file(tmp_path):
     text = output.read_text(encoding="utf-8")
     assert "Final Artifact Summary" in text
     assert "Stage 2 `yolov8s-cls`" in text
+    assert "Weather Export" in text
     assert "stage1_detector_checkpoint: PASS" in text

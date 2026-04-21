@@ -21,7 +21,7 @@ from ultralytics import YOLO
 import yaml
 
 DEFAULT_STAGE1_DATA = "ml/stage1.yaml"
-DEFAULT_STAGE2_DATA = "stage2_data"
+DEFAULT_STAGE2_DATA = "datasets/stage2_data"
 DEFAULT_SINGLE_MODEL_DATA = "ml/single_model.yaml"
 DEFAULT_LOG_DIR = "logs"
 DEFAULT_STAGE1_IMGSZ = 768

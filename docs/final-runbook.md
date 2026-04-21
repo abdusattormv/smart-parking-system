@@ -13,6 +13,7 @@ python ml/prepare_dataset.py --stage2 --pklot-dir datasets/pklot_raw
 ```
 
 Add `--cnrpark-dir <path>` to the Stage 2 command when the CNRPark-EXT patch folders are available.
+The Stage 2 prep command accepts either the official `cnrpark.it` `PATCHES/` + `LABELS/` archive layout or pre-flattened `free/` / `occupied/` folders. When weather labels are present it also writes `datasets/stage2_weather/` for per-weather evaluation.
 
 ## 2. Train Models
 
@@ -47,6 +48,7 @@ Cross-dataset evaluation, when exports are available:
 ```bash
 python ml/evaluate.py --stage2 --weights runs/stage2_cls/yolov8s_stage2/weights/best.pt --cross-dataset pklot_test --device mps
 python ml/evaluate.py --stage2 --weights runs/stage2_cls/yolov8s_stage2/weights/best.pt --cross-dataset cnrpark_test --device mps
+python ml/evaluate.py --stage2 --weights runs/stage2_cls/yolov8s_stage2/weights/best.pt --data datasets/stage2_weather --per-weather --device mps
 ```
 
 ## 4. Export + Benchmark

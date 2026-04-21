@@ -107,6 +107,7 @@ def collect_checkpoints(runs_dir: Path, artifacts_dir: Path) -> dict[str, Any]:
 def required_artifact_checks(manifest: dict[str, Any]) -> dict[str, bool]:
     checkpoints = manifest["checkpoints"]
     stage2_logs = manifest["metrics"]
+    datasets = manifest["datasets"]
     return {
         "stage1_detector_checkpoint": checkpoints["stage1_s"]["present"] or checkpoints["stage1_m"]["present"],
         "stage2_n_checkpoint": checkpoints["stage2"]["n"]["present"],
@@ -116,6 +117,16 @@ def required_artifact_checks(manifest: dict[str, Any]) -> dict[str, bool]:
         "stage2_eval_table": stage2_logs["stage2_evaluation"] is not None,
         "stage2_model_comparison": stage2_logs["stage2_model_comparison"] is not None,
         "threshold_sweep": stage2_logs["stage2_threshold_sweep"] is not None,
+        "cross_dataset_eval": (
+            stage2_logs["stage2_cross_dataset"] is not None
+            if datasets["cnrpark_test"]["present"] or datasets["pklot_test"]["present"]
+            else True
+        ),
+        "per_weather_eval": (
+            stage2_logs["stage2_per_weather"] is not None
+            if datasets.get("stage2_weather", {}).get("present")
+            else True
+        ),
         "benchmark_results": stage2_logs["benchmark_results"] is not None,
         "bandwidth_report": stage2_logs["bandwidth_report_present"],
         "stability_summary": stage2_logs["stability_summary"] is not None,
@@ -160,6 +171,21 @@ def stage1_inventory(report: dict[str, Any] | None) -> dict[str, Any]:
     }
 
 
+def weather_inventory(path: Path) -> dict[str, Any]:
+    inventory: dict[str, Any] = {"present": path.exists(), "splits": {}}
+    if not path.exists():
+        return inventory
+    for weather in ("sunny", "cloudy", "rainy"):
+        weather_dir = path / weather
+        if not weather_dir.exists():
+            continue
+        inventory["splits"][weather] = {
+            "free": count_images(weather_dir / "free"),
+            "occupied": count_images(weather_dir / "occupied"),
+        }
+    return inventory
+
+
 def lines_from_stage2_splits(splits: dict[str, Any]) -> Iterable[str]:
     for split, counts in splits.items():
         yield f"| {split} | {counts.get('free', 0)} | {counts.get('occupied', 0)} |"
@@ -202,6 +228,10 @@ def write_markdown(manifest: dict[str, Any], output_path: Path) -> None:
         f"- `pklot_test`: present={manifest['datasets']['pklot_test']['present']}, free={manifest['datasets']['pklot_test'].get('free', 0)}, occupied={manifest['datasets']['pklot_test'].get('occupied', 0)}",
         f"- `cnrpark_test`: present={manifest['datasets']['cnrpark_test']['present']}, free={manifest['datasets']['cnrpark_test'].get('free', 0)}, occupied={manifest['datasets']['cnrpark_test'].get('occupied', 0)}",
         "",
+        "### Weather Export",
+        "",
+        f"- `stage2_weather`: present={manifest['datasets']['stage2_weather']['present']} splits={manifest['datasets']['stage2_weather'].get('splits', {})}",
+        "",
         "## Checkpoints",
         "",
         f"- Stage 1 `yolov8s`: present={checkpoints['stage1_s']['present']} path=`{checkpoints['stage1_s']['path']}`",
@@ -225,6 +255,8 @@ def write_markdown(manifest: dict[str, Any], output_path: Path) -> None:
             f"- Stage 2 evaluation: `{json.dumps(metrics['stage2_evaluation'], sort_keys=True) if metrics['stage2_evaluation'] else 'missing'}`",
             f"- Stage 2 model comparison: `{json.dumps(metrics['stage2_model_comparison'], sort_keys=True) if metrics['stage2_model_comparison'] else 'missing'}`",
             f"- Stage 2 threshold sweep: `{json.dumps(metrics['stage2_threshold_sweep'], sort_keys=True) if metrics['stage2_threshold_sweep'] else 'missing'}`",
+            f"- Stage 2 cross-dataset: `{json.dumps(metrics['stage2_cross_dataset'], sort_keys=True) if metrics['stage2_cross_dataset'] else 'missing'}`",
+            f"- Stage 2 per-weather: `{json.dumps(metrics['stage2_per_weather'], sort_keys=True) if metrics['stage2_per_weather'] else 'missing'}`",
         ]
     )
 
@@ -239,6 +271,7 @@ def main() -> None:
         "datasets": {
             "stage1": stage1_inventory(stage1_report),
             "stage2": stage2_inventory(Path(args.stage2_dir)),
+            "stage2_weather": weather_inventory(Path("datasets/stage2_weather")),
             "pklot_test": flat_test_inventory(Path(args.pklot_test)),
             "cnrpark_test": flat_test_inventory(Path(args.cnrpark_test)),
         },

@@ -45,6 +45,7 @@ def main() -> None:
 
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+    weights_dir = weights.parent
 
     # Copy checkpoint
     dst_pt = out_dir / "best.pt"
@@ -55,8 +56,9 @@ def main() -> None:
 
     # FP32 ONNX
     print("Exporting FP32 ONNX ...")
-    fp32_result = model.export(format="onnx", imgsz=args.imgsz, simplify=True)
+    fp32_result = model.export(format="onnx", imgsz=args.imgsz, simplify=True, opset=20)
     fp32_src = Path(str(fp32_result))
+    dst_onnx: Path | None = None
     if fp32_src.exists():
         dst_onnx = out_dir / "best.onnx"
         shutil.copy2(fp32_src, dst_onnx)
@@ -66,16 +68,27 @@ def main() -> None:
         print(f"Warning: FP32 ONNX not found at expected path {fp32_src}")
 
     # INT8 ONNX
-    print("Exporting INT8 ONNX ...")
-    int8_result = model.export(format="onnx", imgsz=args.imgsz, int8=True, simplify=True)
-    int8_src = Path(str(int8_result))
-    if int8_src.exists():
-        dst_int8 = out_dir / "best_int8.onnx"
-        shutil.copy2(int8_src, dst_int8)
-        size_mb = dst_int8.stat().st_size / 1_048_576
-        print(f"INT8 ONNX → {dst_int8} ({size_mb:.1f} MB)")
+    if dst_onnx is not None and dst_onnx.exists():
+        print("Exporting INT8 ONNX ...")
+        try:
+            from onnxruntime.quantization import QuantType, quantize_dynamic
+
+            dst_int8 = out_dir / "best_int8.onnx"
+            quantize_dynamic(
+                str(dst_onnx),
+                str(dst_int8),
+                weight_type=QuantType.QInt8,
+            )
+            if weights_dir != out_dir:
+                shutil.copy2(dst_int8, weights_dir / "best_int8.onnx")
+            size_mb = dst_int8.stat().st_size / 1_048_576
+            print(f"INT8 ONNX → {dst_int8} ({size_mb:.1f} MB)")
+        except ImportError:
+            print("Warning: onnxruntime quantization is unavailable; best_int8.onnx was not created.")
+        except Exception as exc:
+            print(f"Warning: INT8 quantization failed: {exc}")
     else:
-        print(f"Warning: INT8 ONNX not found at expected path {int8_src}")
+        print("Warning: skipping INT8 ONNX because the FP32 export was not created.")
 
     print(f"\nArtifacts in {out_dir}:")
     for f in sorted(out_dir.iterdir()):

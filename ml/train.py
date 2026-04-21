@@ -19,6 +19,7 @@ import sys
 import time
 from copy import deepcopy
 from pathlib import Path
+import shutil
 import torch
 
 import ultralytics
@@ -31,9 +32,9 @@ STAGE1_YAML = "ml/stage1.yaml"
 STAGE2_DATA_DIR = "datasets/stage2_data"
 SINGLE_MODEL_YAML = "ml/single_model.yaml"
 
-STAGE1_EPOCHS = 60
-STAGE2_EPOCHS = 60
-SINGLE_MODEL_EPOCHS = 60
+STAGE1_EPOCHS = 50
+STAGE2_EPOCHS = 50
+SINGLE_MODEL_EPOCHS = 50
 STAGE1_IMGSZ = 768
 STAGE2_IMGSZ = 64
 SINGLE_MODEL_IMGSZ = 640
@@ -154,6 +155,18 @@ def _existing_checkpoint(best_ckpt: Path, last_ckpt: Path) -> Path | None:
     if last_ckpt.exists():
         return last_ckpt
     return None
+
+
+def _sync_run_outputs(actual_dir: Path, expected_dir: Path) -> None:
+    if actual_dir == expected_dir or not actual_dir.exists():
+        return
+    expected_dir.mkdir(parents=True, exist_ok=True)
+    for src in actual_dir.iterdir():
+        dst = expected_dir / src.name
+        if src.is_dir():
+            shutil.copytree(src, dst, dirs_exist_ok=True)
+        else:
+            shutil.copy2(src, dst)
 
 
 def _patch_ultralytics_trainer_for_nan_checkpoints() -> None:
@@ -415,6 +428,10 @@ def main() -> None:
     results = _train_with_fallback(model, train_kwargs, args)
     elapsed = time.perf_counter() - started_at
 
+    expected_run_dir = Path(defaults["project_dir"]) / str(defaults["run_name"])
+    actual_run_dir = Path(str(getattr(results, "save_dir", expected_run_dir)))
+    _sync_run_outputs(actual_run_dir, expected_run_dir)
+
     best_ckpt, last_ckpt = _checkpoint_paths(defaults["project_dir"], defaults["run_name"])
     selected_ckpt = _existing_checkpoint(best_ckpt, last_ckpt)
     metric_report = extract_metrics(defaults["task"], results)
@@ -442,6 +459,8 @@ def main() -> None:
         "train_time_s": round(elapsed, 2),
         "best_ckpt": str(best_ckpt),
         "last_ckpt": str(last_ckpt),
+        "actual_run_dir": str(actual_run_dir),
+        "expected_run_dir": str(expected_run_dir),
         "selected_ckpt": str(selected_ckpt) if selected_ckpt else None,
         **metric_report,
     }

@@ -226,8 +226,16 @@ def main() -> None:
     onnx_int8_path = model_path.with_name(model_path.stem + "_int8.onnx")
 
     results: List[Dict[str, Any]] = []
+    available_devices = ["cpu"]
+    try:
+        import torch
 
-    for device in ["mps", "cpu"]:
+        if torch.backends.mps.is_available():
+            available_devices.insert(0, "mps")
+    except Exception:
+        pass
+
+    for device in available_devices:
         print(f"Benchmarking YOLO-{device} ({args.iterations} iters, {args.warmup} warmup)...")
         try:
             r = benchmark_yolo(
@@ -239,19 +247,22 @@ def main() -> None:
 
     for label, path in [("ONNX-fp32", onnx_fp32_path), ("ONNX-int8", onnx_int8_path)]:
         print(f"Benchmarking {label} ({args.iterations} iters, {args.warmup} warmup)...")
-        r = benchmark_onnx(
-            str(path),
-            runtime_frame,
-            task=args.task,
-            imgsz=args.imgsz,
-            iterations=args.iterations,
-            warmup=args.warmup,
-        )
-        if r is not None:
-            r["backend"] = label
-            results.append(r)
-        else:
-            print(f"  Skipped {label}: {path} not found")
+        try:
+            r = benchmark_onnx(
+                str(path),
+                runtime_frame,
+                task=args.task,
+                imgsz=args.imgsz,
+                iterations=args.iterations,
+                warmup=args.warmup,
+            )
+            if r is not None:
+                r["backend"] = label
+                results.append(r)
+            else:
+                print(f"  Skipped {label}: {path} not found")
+        except Exception as exc:
+            print(f"  Skipped {label}: {exc}")
 
     print_results_table(results)
     save_results(results, Path(args.output_json), Path(args.output_csv))

@@ -24,6 +24,7 @@ The final-project default is now:
 ## Canonical Artifacts
 
 - Stage 2 dataset: `stage2_data/`
+- Weather export for CNR evaluation: `datasets/stage2_weather/`
 - Cross-dataset exports: `pklot_test/`, `cnrpark_test/`
 - Stage 2 training handoff: `runs/stage2_cls/.../weights/best.pt`
 - Backend payload:
@@ -85,6 +86,13 @@ python ml/prepare_dataset.py --stage2 --pklot-dir /path/to/pklot_roboflow
 python ml/prepare_dataset.py --stage2 --pklot-dir /path/to/pklot_roboflow --cnrpark-dir /path/to/cnrpark_ext
 ```
 
+`--cnrpark-dir` now supports both:
+
+- pre-flattened patch folders with `free/` and `occupied/` subdirectories
+- the official `cnrpark.it` archive layout with `PATCHES/` and `LABELS/`
+
+When weather labels are available, dataset prep also exports `datasets/stage2_weather/{sunny,cloudy,rainy}/{free,occupied}` for per-weather evaluation.
+
 Train the main classifier comparison set:
 
 ```bash
@@ -111,6 +119,8 @@ Evaluate Stage 2 classification:
 ```bash
 python ml/evaluate.py --stage2 --weights runs/stage2_cls/yolov8n_stage2/weights/best.pt --split val
 python ml/evaluate.py --stage2 --weights runs/stage2_cls/yolov8n_stage2/weights/best.pt --cross-dataset pklot_test
+python ml/evaluate.py --stage2 --weights runs/stage2_cls/yolov8n_stage2/weights/best.pt --cross-dataset cnrpark_test
+python ml/evaluate.py --stage2 --weights runs/stage2_cls/yolov8n_stage2/weights/best.pt --data datasets/stage2_weather --per-weather
 python ml/evaluate.py --stage2 --compare \
   runs/stage2_cls/yolov8n_stage2/weights/best.pt \
   runs/stage2_cls/yolov8s_stage2/weights/best.pt \

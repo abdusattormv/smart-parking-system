@@ -38,6 +38,7 @@ _TINY_BOX_AREA = 0.0025
 STAGE1_DATA_DIR = "datasets/stage1_data"
 STAGE1_YAML = "ml/stage1.yaml"
 STAGE2_DATA_DIR = "datasets/stage2_data"
+STAGE2_WEATHER_DIR = "datasets/stage2_weather"
 SINGLE_MODEL_DATA_DIR = "datasets/single_model_data"
 SINGLE_MODEL_YAML = "ml/single_model.yaml"
 PKLOT_TEST_DIR = "pklot_test"
@@ -69,6 +70,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--stage1-output", default=STAGE1_DATA_DIR)
     parser.add_argument("--stage1-yaml", default=STAGE1_YAML)
     parser.add_argument("--stage2-output", default=STAGE2_DATA_DIR)
+    parser.add_argument("--weather-output", default=STAGE2_WEATHER_DIR)
     parser.add_argument("--single-model-output", default=SINGLE_MODEL_DATA_DIR)
     parser.add_argument("--single-model-yaml", default=SINGLE_MODEL_YAML)
     parser.add_argument("--patch-cache", default=None)
@@ -766,6 +768,108 @@ def collect_legacy_patches(root: Path) -> dict[str, list[Path]]:
     return patches
 
 
+def _cnr_weather_from_path(path: Path) -> str | None:
+    for part in path.parts:
+        lowered = part.lower()
+        if lowered == "sunny":
+            return "sunny"
+        if lowered == "overcast":
+            return "cloudy"
+        if lowered == "cloudy":
+            return "cloudy"
+        if lowered == "rainy":
+            return "rainy"
+    return None
+
+
+def _empty_weather_map() -> dict[str, dict[str, list[Path]]]:
+    return {
+        "sunny": {"free": [], "occupied": []},
+        "cloudy": {"free": [], "occupied": []},
+        "rainy": {"free": [], "occupied": []},
+    }
+
+
+def _append_weather_path(
+    weather_map: dict[str, dict[str, list[Path]]],
+    path: Path,
+    class_name: str,
+) -> None:
+    weather = _cnr_weather_from_path(path)
+    if weather:
+        weather_map[weather][class_name].append(path)
+
+
+def _resolve_cnr_relative_path(root: Path, rel_path: str) -> Path | None:
+    normalized = rel_path.strip().lstrip("./").replace("\\", "/")
+    candidates = [
+        root / normalized,
+        root / "PATCHES" / normalized,
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def collect_cnrpark_patches(root: Path) -> tuple[dict[str, list[Path]], dict[str, dict[str, list[Path]]]]:
+    labels_dir = root / "LABELS"
+    weather_map = _empty_weather_map()
+    if labels_dir.exists():
+        labeled_paths: dict[Path, str] = {}
+        for list_path in sorted(labels_dir.rglob("*.txt")):
+            for raw_line in list_path.read_text(encoding="utf-8").splitlines():
+                line = raw_line.strip()
+                if not line:
+                    continue
+                rel_path, label = line.rsplit(maxsplit=1)
+                if label not in {"0", "1"}:
+                    continue
+                image_path = _resolve_cnr_relative_path(root, rel_path)
+                if image_path is None or image_path.suffix.lower() not in {".jpg", ".jpeg", ".png"}:
+                    continue
+                class_name = "free" if label == "0" else "occupied"
+                previous = labeled_paths.get(image_path)
+                if previous is not None and previous != class_name:
+                    raise SystemExit(
+                        f"Conflicting labels for CNR image {image_path}: {previous} vs {class_name}"
+                    )
+                labeled_paths[image_path] = class_name
+
+        patches = {"free": [], "occupied": []}
+        for image_path, class_name in sorted(labeled_paths.items()):
+            patches[class_name].append(image_path)
+            _append_weather_path(weather_map, image_path, class_name)
+        return patches, weather_map
+
+    patches = collect_legacy_patches(root)
+    for class_name, paths in patches.items():
+        for path in paths:
+            _append_weather_path(weather_map, path, class_name)
+    return patches, weather_map
+
+
+def copy_weather_flat(
+    weather_images: dict[str, dict[str, list[Path]]],
+    dest_root: Path,
+    *,
+    source_root: Path | None = None,
+) -> dict[str, int]:
+    collisions: dict[str, int] = defaultdict(int)
+    for weather, class_map in weather_images.items():
+        for class_name, paths in class_map.items():
+            target_dir = dest_root / weather / class_name
+            target_dir.mkdir(parents=True, exist_ok=True)
+            for src in paths:
+                target = target_dir / _safe_name(src, source_root)
+                if target.exists():
+                    collisions[f"{weather}/{class_name}"] += 1
+                    stem, suffix = target.stem, target.suffix
+                    target = target_dir / f"{stem}__{abs(hash(str(src))) & 0xFFFFFF:06x}{suffix}"
+                shutil.copy2(src, target)
+    return dict(collisions)
+
+
 def prepare_stage2(args: argparse.Namespace) -> None:
     validate_split_ratios(args.val_ratio, args.test_ratio)
     pklot_dir = Path(args.pklot_dir)
@@ -805,11 +909,12 @@ def prepare_stage2(args: argparse.Namespace) -> None:
     cnrpark_splits = {"train": {"free": [], "occupied": []}, "val": {"free": [], "occupied": []}, "test": {"free": [], "occupied": []}}
     cnr_source_root: Path | None = None
     cnr_images = {"free": [], "occupied": []}
+    cnr_weather = _empty_weather_map()
     if args.cnrpark_dir:
         cnr_source_root = Path(args.cnrpark_dir)
         if not cnr_source_root.exists():
             raise SystemExit(f"CNRPark directory not found: {cnr_source_root}")
-        cnr_images = collect_legacy_patches(cnr_source_root)
+        cnr_images, cnr_weather = collect_cnrpark_patches(cnr_source_root)
         print(f"\n[Stage 2] Collected CNRPark patches: free={len(cnr_images['free'])} occupied={len(cnr_images['occupied'])}")
         if any(cnr_images.values()):
             cnrpark_splits = stratified_split(
@@ -841,8 +946,14 @@ def prepare_stage2(args: argparse.Namespace) -> None:
             Path(args.cnrpark_test_output),
             source_root=cnr_source_root,
         )
+        weather_collisions = copy_weather_flat(
+            cnr_weather,
+            Path(args.weather_output),
+            source_root=cnr_source_root,
+        )
     else:
         cnr_collisions = {}
+        weather_collisions = {}
 
     all_images = {
         "free": (
@@ -860,6 +971,7 @@ def prepare_stage2(args: argparse.Namespace) -> None:
             **collisions,
             **{f"pklot_test/{k}": v for k, v in pklot_collisions.items()},
             **{f"cnrpark_test/{k}": v for k, v in cnr_collisions.items()},
+            **{f"weather/{k}": v for k, v in weather_collisions.items()},
         },
         report_path=stage2_output / SANITY_REPORT,
         scene_split_summary={
@@ -879,6 +991,13 @@ def prepare_stage2(args: argparse.Namespace) -> None:
     if args.cnrpark_dir and any(cnr_images.values()):
         cnr_counts = {cls: len(paths) for cls, paths in cnrpark_splits["test"].items()}
         print(f"  cnrpark_test: {cnr_counts}")
+        weather_counts = {
+            weather: {cls: len(paths) for cls, paths in class_map.items()}
+            for weather, class_map in cnr_weather.items()
+            if any(class_map.values())
+        }
+        if weather_counts:
+            print(f"  weather export: {weather_counts}")
 
 
 def weather_split_paths(root: Path) -> dict[str, Path]:
