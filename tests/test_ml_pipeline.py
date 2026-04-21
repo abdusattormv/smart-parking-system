@@ -33,6 +33,27 @@ def test_stratified_split_creates_all_splits():
     assert all(splits[split]["occupied"] for split in splits)
 
 
+def test_normalize_source_stem_strips_roboflow_suffix():
+    assert prepare_dataset.normalize_source_stem("parking_lot_1_mp4-75_jpg.rf.97bf95f9bd26391575f2c08e5866c6bd.jpg") == "parking_lot_1_mp4-75_jpg"
+    assert prepare_dataset.normalize_source_stem("sample.jpg") == "sample"
+
+
+def test_assign_scene_splits_has_no_overlap():
+    records = [
+        {"scene_id": "scene_a", "normalized_stem": "a", "box_count": 1},
+        {"scene_id": "scene_b", "normalized_stem": "b", "box_count": 1},
+        {"scene_id": "scene_c", "normalized_stem": "c", "box_count": 1},
+        {"scene_id": "scene_d", "normalized_stem": "d", "box_count": 1},
+    ]
+    splits = prepare_dataset.assign_scene_splits(records, val_ratio=0.2, test_ratio=0.2, seed=7)
+
+    seen = {}
+    for split, split_records in splits.items():
+        for record in split_records:
+            assert record["scene_id"] not in seen
+            seen[record["scene_id"]] = split
+
+
 def test_copy_images_handles_filename_collisions(tmp_path):
     src_a = tmp_path / "src_a" / "free" / "image.jpg"
     src_b = tmp_path / "src_b" / "free" / "image.jpg"
@@ -82,36 +103,40 @@ def test_weather_split_paths_requires_expected_layout(tmp_path):
 
 def test_prepare_single_model_detection_preserves_two_classes(tmp_path):
     root = tmp_path / "pklot"
-    make_image(root / "train" / "images" / "sample.jpg", 20)
+    make_image(root / "train" / "images" / "parking_lot_1_mp4-0_jpg.rf.aaaa.jpg", 20)
     make_label(
-        root / "train" / "labels" / "sample.txt",
+        root / "train" / "labels" / "parking_lot_1_mp4-0_jpg.rf.aaaa.txt",
         [
             "0 0.5 0.5 0.4 0.4",
             "1 0.2 0.2 0.1 0.1",
         ],
     )
-    make_image(root / "valid" / "images" / "sample.jpg", 20)
-    make_label(root / "valid" / "labels" / "sample.txt", ["1 0.5 0.5 0.4 0.4"])
-    make_image(root / "test" / "images" / "sample.jpg", 20)
-    make_label(root / "test" / "labels" / "sample.txt", ["0 0.5 0.5 0.4 0.4"])
+    make_image(root / "valid" / "images" / "parking_lot_2_mp4-1_jpg.rf.bbbb.jpg", 20)
+    make_label(root / "valid" / "labels" / "parking_lot_2_mp4-1_jpg.rf.bbbb.txt", ["1 0.5 0.5 0.4 0.4"])
+    make_image(root / "test" / "images" / "parking_lot_3_mp4-2_jpg.rf.cccc.jpg", 20)
+    make_label(root / "test" / "labels" / "parking_lot_3_mp4-2_jpg.rf.cccc.txt", ["0 0.5 0.5 0.4 0.4"])
 
     out_dir = tmp_path / "single_model_data"
     yaml_path = tmp_path / "single_model.yaml"
     prepare_dataset.prepare_single_model_detection(root, out_dir, yaml_path)
 
-    assert (out_dir / "train" / "images" / "sample.jpg").exists()
-    labels = (out_dir / "train" / "labels" / "sample.txt").read_text(encoding="utf-8").splitlines()
-    assert labels == [
+    all_labels = []
+    for label_path in sorted((out_dir).glob("*/*/*.txt")):
+        all_labels.extend(label_path.read_text(encoding="utf-8").splitlines())
+    assert sorted(all_labels) == sorted([
         "0 0.500000 0.500000 0.400000 0.400000",
         "1 0.200000 0.200000 0.100000 0.100000",
-    ]
+        "1 0.500000 0.500000 0.400000 0.400000",
+        "0 0.500000 0.500000 0.400000 0.400000",
+    ])
     yaml_text = yaml_path.read_text(encoding="utf-8")
     assert "names:" in yaml_text
     assert "- free" in yaml_text
     assert "- occupied" in yaml_text
     report = json.loads((out_dir / prepare_dataset.DETECTION_REPORT).read_text(encoding="utf-8"))
     assert report["track"] == "single_model"
-    assert report["splits"]["train"]["empty_label_frames_excluded"] == 0
+    assert report["empty_label_frames_excluded"] == 0
+    assert report["leakage_checks"]["scene_leakage_detected"] is False
 
 
 def test_iter_detection_boxes_converts_polygon_to_clipped_box(tmp_path):
@@ -136,22 +161,22 @@ def test_iter_detection_boxes_converts_polygon_to_clipped_box(tmp_path):
 
 def test_prepare_single_model_detection_converts_polygon_labels(tmp_path):
     root = tmp_path / "pklot"
-    make_image(root / "train" / "images" / "sample.jpg", 20)
+    make_image(root / "train" / "images" / "parking_lot_1_mp4-0_jpg.rf.aaaa.jpg", 20)
     make_label(
-        root / "train" / "labels" / "sample.txt",
+        root / "train" / "labels" / "parking_lot_1_mp4-0_jpg.rf.aaaa.txt",
         [
             "0 0.10 0.20 0.40 0.20 0.40 0.60 0.10 0.60",
             "1 0.50 0.50 0.70 0.50 0.70 0.90 0.50 0.90",
         ],
     )
-    make_image(root / "valid" / "images" / "sample.jpg", 20)
+    make_image(root / "valid" / "images" / "parking_lot_2_mp4-1_jpg.rf.bbbb.jpg", 20)
     make_label(
-        root / "valid" / "labels" / "sample.txt",
+        root / "valid" / "labels" / "parking_lot_2_mp4-1_jpg.rf.bbbb.txt",
         ["1 0.50 0.50 0.70 0.50 0.70 0.90 0.50 0.90"],
     )
-    make_image(root / "test" / "images" / "sample.jpg", 20)
+    make_image(root / "test" / "images" / "parking_lot_3_mp4-2_jpg.rf.cccc.jpg", 20)
     make_label(
-        root / "test" / "labels" / "sample.txt",
+        root / "test" / "labels" / "parking_lot_3_mp4-2_jpg.rf.cccc.txt",
         ["0 0.10 0.20 0.40 0.20 0.40 0.60 0.10 0.60"],
     )
 
@@ -159,50 +184,93 @@ def test_prepare_single_model_detection_converts_polygon_labels(tmp_path):
     yaml_path = tmp_path / "single_model.yaml"
     prepare_dataset.prepare_single_model_detection(root, out_dir, yaml_path)
 
-    labels = (out_dir / "train" / "labels" / "sample.txt").read_text(encoding="utf-8").splitlines()
-    assert labels == [
+    all_labels = []
+    for label_path in sorted((out_dir).glob("*/*/*.txt")):
+        all_labels.extend(label_path.read_text(encoding="utf-8").splitlines())
+    assert sorted(all_labels) == sorted([
         "0 0.250000 0.400000 0.300000 0.400000",
         "1 0.600000 0.700000 0.200000 0.400000",
-    ]
+        "1 0.600000 0.700000 0.200000 0.400000",
+        "0 0.250000 0.400000 0.300000 0.400000",
+    ])
     report = json.loads((out_dir / prepare_dataset.DETECTION_REPORT).read_text(encoding="utf-8"))
-    assert report["splits"]["train"]["polygon_labels_converted"] == 2
+    assert report["polygon_labels_converted"] == 4
 
 
 def test_prepare_stage1_excludes_empty_label_frames(tmp_path):
     root = tmp_path / "pklot"
-    make_image(root / "train" / "images" / "kept.jpg", 20)
-    make_label(root / "train" / "labels" / "kept.txt", ["1 0.5 0.5 0.4 0.4"])
-    make_image(root / "train" / "images" / "empty.jpg", 20)
-    make_label(root / "train" / "labels" / "empty.txt", [])
-    make_image(root / "valid" / "images" / "sample.jpg", 20)
-    make_label(root / "valid" / "labels" / "sample.txt", ["0 0.5 0.5 0.4 0.4"])
-    make_image(root / "test" / "images" / "sample.jpg", 20)
-    make_label(root / "test" / "labels" / "sample.txt", ["0 0.5 0.5 0.4 0.4"])
+    make_image(root / "train" / "images" / "parking_lot_1_mp4-0_jpg.rf.aaaa.jpg", 20)
+    make_label(root / "train" / "labels" / "parking_lot_1_mp4-0_jpg.rf.aaaa.txt", ["1 0.5 0.5 0.4 0.4"])
+    make_image(root / "train" / "images" / "parking_lot_1_mp4-1_jpg.rf.bbbb.jpg", 20)
+    make_label(root / "train" / "labels" / "parking_lot_1_mp4-1_jpg.rf.bbbb.txt", [])
+    make_image(root / "valid" / "images" / "parking_lot_2_mp4-2_jpg.rf.cccc.jpg", 20)
+    make_label(root / "valid" / "labels" / "parking_lot_2_mp4-2_jpg.rf.cccc.txt", ["0 0.5 0.5 0.4 0.4"])
+    make_image(root / "test" / "images" / "parking_lot_3_mp4-3_jpg.rf.dddd.jpg", 20)
+    make_label(root / "test" / "labels" / "parking_lot_3_mp4-3_jpg.rf.dddd.txt", ["0 0.5 0.5 0.4 0.4"])
 
     out_dir = tmp_path / "stage1_data"
     yaml_path = tmp_path / "stage1.yaml"
     prepare_dataset.prepare_stage1(root, out_dir, yaml_path)
 
-    assert (out_dir / "train" / "images" / "kept.jpg").exists()
-    assert not (out_dir / "train" / "images" / "empty.jpg").exists()
+    written = sorted((out_dir / "train" / "images").glob("*.jpg"))
+    assert written
+    assert all("parking_lot_1_mp4-1_jpg" not in path.name for path in written)
     report = json.loads((out_dir / prepare_dataset.DETECTION_REPORT).read_text(encoding="utf-8"))
     assert report["track"] == "stage1"
-    assert report["splits"]["train"]["empty_label_frames_excluded"] == 1
+    assert report["empty_label_frames_excluded"] == 1
+    assert report["leakage_checks"]["scene_leakage_detected"] is False
 
 
 def test_collect_roboflow_patches_uses_polygon_boxes(tmp_path):
     root = tmp_path / "pklot"
-    make_image(root / "train" / "images" / "sample.jpg", 128)
+    make_image(root / "train" / "images" / "parking_lot_1_mp4-0_jpg.rf.aaaa.jpg", 128)
     make_label(
-        root / "train" / "labels" / "sample.txt",
+        root / "train" / "labels" / "parking_lot_1_mp4-0_jpg.rf.aaaa.txt",
+        ["1 0.25 0.25 0.50 0.25 0.50 0.75 0.25 0.75"],
+    )
+    make_image(root / "valid" / "images" / "parking_lot_2_mp4-1_jpg.rf.bbbb.jpg", 128)
+    make_label(
+        root / "valid" / "labels" / "parking_lot_2_mp4-1_jpg.rf.bbbb.txt",
+        ["0 0.25 0.25 0.50 0.25 0.50 0.75 0.25 0.75"],
+    )
+    make_image(root / "test" / "images" / "parking_lot_3_mp4-2_jpg.rf.cccc.jpg", 128)
+    make_label(
+        root / "test" / "labels" / "parking_lot_3_mp4-2_jpg.rf.cccc.txt",
         ["1 0.25 0.25 0.50 0.25 0.50 0.75 0.25 0.75"],
     )
 
     patches = prepare_dataset.collect_roboflow_patches(root, tmp_path / "patches")
 
-    assert len(patches["occupied"]) == 1
+    assert len(patches["occupied"]) == 2
     with Image.open(patches["occupied"][0]) as patch:
         assert patch.size == (8, 12)
+
+
+def test_prepare_stage2_inherits_scene_holdout(tmp_path):
+    root = tmp_path / "pklot"
+    make_image(root / "train" / "images" / "parking_lot_1_mp4-0_jpg.rf.aaaa.jpg", 100)
+    make_label(root / "train" / "labels" / "parking_lot_1_mp4-0_jpg.rf.aaaa.txt", ["0 0.3 0.3 0.2 0.2", "1 0.7 0.7 0.2 0.2"])
+    make_image(root / "valid" / "images" / "parking_lot_2_mp4-1_jpg.rf.bbbb.jpg", 100)
+    make_label(root / "valid" / "labels" / "parking_lot_2_mp4-1_jpg.rf.bbbb.txt", ["0 0.3 0.3 0.2 0.2", "1 0.7 0.7 0.2 0.2"])
+    make_image(root / "test" / "images" / "parking_lot_3_mp4-2_jpg.rf.cccc.jpg", 100)
+    make_label(root / "test" / "labels" / "parking_lot_3_mp4-2_jpg.rf.cccc.txt", ["0 0.3 0.3 0.2 0.2", "1 0.7 0.7 0.2 0.2"])
+
+    args = SimpleNamespace(
+        pklot_dir=str(root),
+        cnrpark_dir=None,
+        patch_cache=str(tmp_path / "patches"),
+        stage2_output=str(tmp_path / "stage2_data"),
+        pklot_test_output=str(tmp_path / "pklot_test"),
+        cnrpark_test_output=str(tmp_path / "cnrpark_test"),
+        val_ratio=0.2,
+        test_ratio=0.2,
+        seed=7,
+    )
+    prepare_dataset.prepare_stage2(args)
+
+    report = json.loads((tmp_path / "stage2_data" / prepare_dataset.SANITY_REPORT).read_text(encoding="utf-8"))
+    assert report["scene_holdout"]["source"] == "pklot_scene_holdout"
+    assert report["scene_holdout"]["leakage_checks"]["scene_leakage_detected"] is False
 
 
 def test_train_requires_explicit_mode(monkeypatch):

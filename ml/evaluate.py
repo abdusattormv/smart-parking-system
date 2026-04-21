@@ -13,17 +13,19 @@ from __future__ import annotations
 import argparse
 import csv
 import json
-from collections import Counter
 from pathlib import Path
-from typing import Iterable
+from typing import Any
 
 from sklearn.metrics import accuracy_score, confusion_matrix, precision_recall_fscore_support
 from ultralytics import YOLO
+import yaml
 
 DEFAULT_STAGE1_DATA = "ml/stage1.yaml"
 DEFAULT_STAGE2_DATA = "stage2_data"
 DEFAULT_SINGLE_MODEL_DATA = "ml/single_model.yaml"
 DEFAULT_LOG_DIR = "logs"
+DEFAULT_STAGE1_IMGSZ = 768
+DEFAULT_DETECT_IMGSZ = 768
 CLASS_NAMES = ("free", "occupied")
 WEATHER_NAMES = ("sunny", "cloudy", "rainy")
 
@@ -131,6 +133,40 @@ def evaluation_mode(args: argparse.Namespace) -> str:
     return "stage2"
 
 
+def _yaml_dataset_root(yaml_path: str) -> Path:
+    data = yaml.safe_load(Path(yaml_path).read_text(encoding="utf-8"))
+    root = data.get("path")
+    if not root:
+        raise SystemExit(f"Dataset YAML missing path: {yaml_path}")
+    return Path(root)
+
+
+def detection_report_for_yaml(yaml_path: str) -> dict[str, Any] | None:
+    report_path = _yaml_dataset_root(yaml_path) / "detection_dataset_report.json"
+    if not report_path.exists():
+        return None
+    return json.loads(report_path.read_text(encoding="utf-8"))
+
+
+def detection_scene_rows(report: dict[str, Any] | None) -> list[dict[str, object]]:
+    if not report:
+        return []
+    rows = []
+    for split in ("train", "val", "test"):
+        split_report = report.get("splits", {}).get(split)
+        if not split_report:
+            continue
+        rows.append(
+            {
+                "split": split,
+                "scene_count": split_report.get("scene_count", 0),
+                "image_count": split_report.get("images_kept", 0),
+                "box_count": split_report.get("boxes_kept", 0),
+            }
+        )
+    return rows
+
+
 def classification_samples(dataset_dir: Path) -> list[tuple[Path, str]]:
     samples: list[tuple[Path, str]] = []
     for class_name in CLASS_NAMES:
@@ -195,14 +231,18 @@ def classify_dataset(
 def evaluate_stage1(args: argparse.Namespace) -> None:
     if not args.weights:
         raise SystemExit("--weights is required for Stage 1 evaluation.")
+    data_yaml = stage1_data(args.data)
     model = YOLO(args.weights)
     metrics = model.val(
-        data=stage1_data(args.data),
+        data=data_yaml,
         split=args.split,
         device=args.device,
-        imgsz=max(args.imgsz, 640),
+        imgsz=max(args.imgsz, DEFAULT_STAGE1_IMGSZ),
         verbose=False,
     ).results_dict
+    report = detection_report_for_yaml(data_yaml)
+    split_report = report.get("splits", {}).get(args.split, {}) if report else {}
+    leakage = report.get("leakage_checks", {}) if report else {}
     row = {
         "model": Path(args.weights).parent.parent.name,
         "split": args.split,
@@ -210,22 +250,31 @@ def evaluate_stage1(args: argparse.Namespace) -> None:
         "mAP50_95": round(float(metrics.get("metrics/mAP50-95(B)", 0.0)), 4),
         "precision": round(float(metrics.get("metrics/precision(B)", 0.0)), 4),
         "recall": round(float(metrics.get("metrics/recall(B)", 0.0)), 4),
+        "scene_count": split_report.get("scene_count", 0),
+        "scene_leakage": leakage.get("scene_leakage_detected", False),
     }
     print_rows([row], "Stage 1 Detection Evaluation")
     append_csv([row], Path(args.log_dir), "stage1_evaluation.csv")
+    scene_rows = detection_scene_rows(report)
+    if scene_rows:
+        print_rows(scene_rows, "Stage 1 Holdout Scene Summary")
 
 
 def evaluate_single_model(args: argparse.Namespace) -> None:
     if not args.weights:
         raise SystemExit("--weights is required for single-model evaluation.")
+    data_yaml = single_model_data(args.data)
     model = YOLO(args.weights)
     metrics = model.val(
-        data=single_model_data(args.data),
+        data=data_yaml,
         split=args.split,
         device=args.device,
-        imgsz=max(args.imgsz, 640),
+        imgsz=max(args.imgsz, DEFAULT_DETECT_IMGSZ),
         verbose=False,
     ).results_dict
+    report = detection_report_for_yaml(data_yaml)
+    split_report = report.get("splits", {}).get(args.split, {}) if report else {}
+    leakage = report.get("leakage_checks", {}) if report else {}
     row = {
         "model": Path(args.weights).parent.parent.name,
         "split": args.split,
@@ -233,9 +282,14 @@ def evaluate_single_model(args: argparse.Namespace) -> None:
         "mAP50_95": round(float(metrics.get("metrics/mAP50-95(B)", 0.0)), 4),
         "precision": round(float(metrics.get("metrics/precision(B)", 0.0)), 4),
         "recall": round(float(metrics.get("metrics/recall(B)", 0.0)), 4),
+        "scene_count": split_report.get("scene_count", 0),
+        "scene_leakage": leakage.get("scene_leakage_detected", False),
     }
     print_rows([row], "Single-Model Detection Evaluation")
     append_csv([row], Path(args.log_dir), "single_model_evaluation.csv")
+    scene_rows = detection_scene_rows(report)
+    if scene_rows:
+        print_rows(scene_rows, "Single-Model Holdout Scene Summary")
 
 
 def evaluate_stage2(weights: str, dataset_dir: Path, args: argparse.Namespace, label: str) -> dict[str, object]:
@@ -298,7 +352,7 @@ def evaluate_compare(args: argparse.Namespace) -> None:
             data=data_yaml,
             split=args.split,
             device=args.device,
-            imgsz=max(args.imgsz, 640),
+            imgsz=max(args.imgsz, DEFAULT_STAGE1_IMGSZ if mode == "stage1" else DEFAULT_DETECT_IMGSZ),
             verbose=False,
         ).results_dict
         rows.append(

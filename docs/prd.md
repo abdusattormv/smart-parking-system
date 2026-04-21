@@ -6,25 +6,27 @@ The repo is aligned to a two-stage edge pipeline:
 
 `static camera -> fixed ROIs -> per-spot crop -> YOLOv8*-cls -> temporal smoothing -> JSON -> FastAPI`
 
-- Stage 1 default: fixed ROI boxes from config for a static camera
-- Stage 1 optional: YOLO spot detector only for experiments or future work
-- Stage 2 primary: PKLot + optional CNRPark-EXT patch classification
+- Recommended ML path: full-frame slot detector -> per-slot crop -> occupancy classifier
+- Deployment-specific edge demo: fixed ROI boxes from config for a static camera
+- Stage 1 primary ML track: YOLO slot detector trained with scene holdout
+- Stage 2 primary ML track: PKLot + optional CNRPark-EXT patch classification
 - Single-model baseline: full-frame occupancy detector with `free` / `occupied` classes for ML comparison only
-- Main success metric: Stage 2 classification accuracy and cross-dataset generalization
-- Detection-style PKLot prep must exclude zero-label frames because they are unsafe supervision for full-frame detection baselines
+- Main success metrics: Stage 1 slot-detection generalization by held-out scene and Stage 2 occupancy accuracy
+- Detection-style PKLot prep must deduplicate Roboflow variants, exclude zero-label frames, and prevent scene leakage across train/val/test
 
 ## ML Scope
 
-Stage 2 is the main workflow:
+The ML workflow is:
 
-1. extract PKLot spot patches from Roboflow labels
-2. optionally merge CNRPark-EXT patches
-3. create `stage2_data/` train/val/test splits
-4. export `pklot_test/` and `cnrpark_test/` for cross-dataset checks
-5. train `yolov8{n,s,m}-cls`
-6. evaluate top-1 accuracy, precision, recall, F1, confusion matrix, and per-class support
+1. deduplicate PKLot Roboflow source frames by normalized base id
+2. rebuild Stage 1 and single-model splits by scene holdout, not random images
+3. train Stage 1 full-frame slot detector
+4. crop Stage 2 patches from accepted slot annotations while inheriting the same scene split
+5. optionally merge CNRPark-EXT patches
+6. train `yolov8{n,s,m}-cls`
+7. evaluate top-1 accuracy, precision, recall, F1, confusion matrix, and per-class support
 
-Stage 1 detection training remains available, and the repo also supports an ML-only single-model occupancy detector baseline. The deployed/default repo story remains two-stage.
+Stage 1 detection training is the primary generalization track. The repo also supports an ML-only single-model occupancy detector baseline. The deployed/default repo story remains two-stage.
 
 ## Runtime Contract
 
@@ -51,12 +53,13 @@ Edge output and backend storage use the same payload:
 
 ## Evaluation Expectations
 
-- primary split: validation
+- primary split: validation from a scene-held-out dataset
 - cross-dataset: PKLot -> CNRPark and CNRPark -> PKLot when both datasets are present
 - model comparison: `n`, `s`, `m`
 - single-model baseline comparison: full-frame occupancy detection vs the separate Stage 1 + Stage 2 approach
 - threshold sweep: classifier confidence threshold used by the deployed edge path
 - per-weather evaluation: only when dataset folders expose weather labels directly as `<root>/<weather>/<class>/*`
+- image-level random split metrics are not sufficient evidence of full-frame generalization
 
 ## Deliverables
 

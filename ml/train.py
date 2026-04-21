@@ -31,10 +31,10 @@ STAGE1_YAML = "ml/stage1.yaml"
 STAGE2_DATA_DIR = "stage2_data"
 SINGLE_MODEL_YAML = "ml/single_model.yaml"
 
-STAGE1_EPOCHS = 50
+STAGE1_EPOCHS = 60
 STAGE2_EPOCHS = 60
 SINGLE_MODEL_EPOCHS = 60
-STAGE1_IMGSZ = 640
+STAGE1_IMGSZ = 768
 STAGE2_IMGSZ = 64
 SINGLE_MODEL_IMGSZ = 640
 DEFAULT_BATCH = 16
@@ -64,7 +64,7 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Train the ML-only single-model occupancy detector baseline.",
     )
-    parser.add_argument("--variant", choices=["n", "s", "m"], default="n")
+    parser.add_argument("--variant", choices=["n", "s", "m"], default="s")
     parser.add_argument("--data", default=None, help="Override data path.")
     parser.add_argument("--epochs", type=int, default=None)
     parser.add_argument("--imgsz", type=int, default=None)
