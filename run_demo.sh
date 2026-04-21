@@ -4,6 +4,7 @@
 #   ./run_demo.sh                        # uses bundled sample image
 #   ./run_demo.sh --image /path/to/img   # uses your own image
 #   ./run_demo.sh --camera 0             # live webcam mode
+#   ./run_demo.sh --camera iphone        # macOS Continuity Camera / iPhone camera
 
 set -e
 

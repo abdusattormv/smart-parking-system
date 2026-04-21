@@ -1,4 +1,5 @@
 import sys
+from types import SimpleNamespace
 from pathlib import Path
 
 import numpy as np
@@ -11,6 +12,7 @@ from edge.detect import (
     build_payload,
     classify_patch,
     crop_patch,
+    resolve_camera_source,
     load_rois,
     normalize_rois,
     run_pipeline,
@@ -38,6 +40,22 @@ class FakeYOLO:
         return [FakeResult(label, confidence)]
 
 
+class FakeCapture:
+    def __init__(self, opens: bool, reads: bool):
+        self._opens = opens
+        self._reads = reads
+        self.released = False
+
+    def isOpened(self):
+        return self._opens
+
+    def read(self):
+        return self._reads, np.zeros((4, 4, 3), dtype=np.uint8)
+
+    def release(self):
+        self.released = True
+
+
 def test_normalize_rois_accepts_valid_boxes():
     rois = normalize_rois({"spot_1": [0, 1, 10, 20]})
     assert rois == {"spot_1": (0, 1, 10, 20)}
@@ -47,6 +65,72 @@ def test_load_rois_reads_config(tmp_path):
     config = tmp_path / "config.yaml"
     config.write_text("rois:\n  a: [1, 2, 3, 4]\n", encoding="utf-8")
     assert load_rois(config) == {"a": (1, 2, 3, 4)}
+
+
+def test_resolve_camera_source_accepts_numeric_indexes():
+    assert resolve_camera_source("0") == 0
+    assert resolve_camera_source("12") == 12
+
+
+def test_resolve_camera_source_rejects_invalid_tokens():
+    with pytest.raises(ValueError, match="Invalid --camera value"):
+        resolve_camera_source("front-door")
+
+
+def test_resolve_camera_source_rejects_iphone_outside_macos(monkeypatch):
+    monkeypatch.setattr("edge.detect.platform.system", lambda: "Linux")
+    with pytest.raises(ValueError, match="supported only on macOS"):
+        resolve_camera_source("iphone")
+
+
+def test_resolve_camera_source_requires_detected_iphone_camera(monkeypatch):
+    monkeypatch.setattr("edge.detect.platform.system", lambda: "Darwin")
+    monkeypatch.setattr(
+        "edge.detect.subprocess.run",
+        lambda *args, **kwargs: SimpleNamespace(stdout='{"SPCameraDataType": [{"_name": "FaceTime HD Camera"}]}'),
+    )
+    with pytest.raises(ValueError, match="No iPhone camera detected"):
+        resolve_camera_source("iphone")
+
+
+def test_resolve_camera_source_uses_matching_iphone_camera(monkeypatch):
+    monkeypatch.setattr("edge.detect.platform.system", lambda: "Darwin")
+    monkeypatch.setattr(
+        "edge.detect.subprocess.run",
+        lambda *args, **kwargs: SimpleNamespace(
+            stdout='{"SPCameraDataType": [{"_name": "John’s iPhone Camera"}]}'
+        ),
+    )
+    monkeypatch.setattr("edge.detect._macos_camera_backend", lambda: 1200)
+
+    attempted = []
+
+    def fake_video_capture(index, backend):
+        attempted.append((index, backend))
+        return FakeCapture(opens=index == 2, reads=index == 2)
+
+    monkeypatch.setattr("edge.detect.cv2.VideoCapture", fake_video_capture)
+
+    assert resolve_camera_source("iphone", probe_limit=4) == 2
+    assert attempted == [(0, 1200), (1, 1200), (2, 1200)]
+
+
+def test_resolve_camera_source_fails_when_no_camera_index_opens(monkeypatch):
+    monkeypatch.setattr("edge.detect.platform.system", lambda: "Darwin")
+    monkeypatch.setattr(
+        "edge.detect.subprocess.run",
+        lambda *args, **kwargs: SimpleNamespace(
+            stdout='{"SPCameraDataType": [{"_name": "Continuity Camera"}]}'
+        ),
+    )
+    monkeypatch.setattr("edge.detect._macos_camera_backend", lambda: 1200)
+    monkeypatch.setattr(
+        "edge.detect.cv2.VideoCapture",
+        lambda index, backend: FakeCapture(opens=False, reads=False),
+    )
+
+    with pytest.raises(RuntimeError, match="could not open any AVFoundation camera index"):
+        resolve_camera_source("iphone", probe_limit=3)
 
 
 def test_crop_patch_returns_none_for_invalid_box():

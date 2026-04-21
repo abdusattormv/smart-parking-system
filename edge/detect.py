@@ -14,6 +14,8 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import platform
+import subprocess
 import time
 from collections import deque
 from datetime import datetime, timezone
@@ -36,6 +38,7 @@ DEFAULT_LOG_DIR = Path("logs")
 DEFAULT_LOG_FORMAT = "json"
 DEFAULT_STAGE2_THRESHOLD = 0.5
 DEFAULT_CONFIG_PATH = Path(__file__).parent / "config.yaml"
+DEFAULT_CAMERA_PROBE_LIMIT = 10
 
 DEFAULT_ROIS: Dict[str, Tuple[int, int, int, int]] = {
     "spot_1": (50, 100, 200, 250),
@@ -61,7 +64,11 @@ def parse_args() -> argparse.Namespace:
     )
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--image", help="Path to a parking image (static mode).")
-    group.add_argument("--camera", type=int, metavar="INDEX", help="Camera device index.")
+    group.add_argument(
+        "--camera",
+        metavar="SOURCE",
+        help="Camera source: numeric index like 0 or the macOS-only value 'iphone'.",
+    )
 
     parser.add_argument(
         "--stage2-model",
@@ -368,6 +375,73 @@ def create_models(args: argparse.Namespace) -> Tuple[Optional[YOLO], YOLO]:
     return stage1_model, stage2_model
 
 
+def _collect_camera_names(node: Any) -> Iterable[str]:
+    if isinstance(node, dict):
+        for key, value in node.items():
+            lowered = str(key).lower()
+            if lowered in {"_name", "name", "spcamera_name"} and isinstance(value, str):
+                yield value
+            yield from _collect_camera_names(value)
+    elif isinstance(node, list):
+        for item in node:
+            yield from _collect_camera_names(item)
+
+
+def _has_iphone_camera(camera_data: dict) -> bool:
+    keywords = ("iphone", "continuity")
+    for name in _collect_camera_names(camera_data):
+        lowered = name.lower()
+        if any(keyword in lowered for keyword in keywords):
+            return True
+    return False
+
+
+def _macos_camera_backend() -> int:
+    return int(getattr(cv2, "CAP_AVFOUNDATION", 0))
+
+
+def _probe_camera_index(index: int, backend: Optional[int] = None) -> bool:
+    if backend in (None, 0):
+        capture = cv2.VideoCapture(index)
+    else:
+        capture = cv2.VideoCapture(index, backend)
+    try:
+        if not capture.isOpened():
+            return False
+        ok, _frame = capture.read()
+        return bool(ok)
+    finally:
+        capture.release()
+
+
+def resolve_camera_source(source: str, probe_limit: int = DEFAULT_CAMERA_PROBE_LIMIT) -> int:
+    value = str(source).strip()
+    if value.isdigit():
+        return int(value)
+    if value.lower() != "iphone":
+        raise ValueError("Invalid --camera value. Use a numeric index like '0' or 'iphone'.")
+    if platform.system() != "Darwin":
+        raise ValueError("The iPhone camera option is supported only on macOS.")
+
+    result = subprocess.run(
+        ["system_profiler", "SPCameraDataType", "-json"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    camera_data = json.loads(result.stdout or "{}")
+    if not _has_iphone_camera(camera_data):
+        raise ValueError(
+            "No iPhone camera detected. Connect or enable Continuity Camera in macOS and try again."
+        )
+
+    backend = _macos_camera_backend()
+    for index in range(max(1, int(probe_limit))):
+        if _probe_camera_index(index, backend):
+            return index
+    raise RuntimeError("Detected an iPhone camera but could not open any AVFoundation camera index.")
+
+
 def run_inference(args: argparse.Namespace, fixed_rois: Dict[str, Tuple[int, int, int, int]]) -> int:
     image_path = Path(args.image)
     if not image_path.exists():
@@ -442,6 +516,7 @@ def main() -> None:
     fixed_rois = normalize_rois(cfg.get("rois"))
 
     if args.camera is not None:
+        args.camera = resolve_camera_source(args.camera)
         raise SystemExit(run_camera(args, fixed_rois))
     raise SystemExit(run_inference(args, fixed_rois))
 

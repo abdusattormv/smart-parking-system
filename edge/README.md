@@ -45,6 +45,17 @@ python edge/detect.py \
   --post
 ```
 
+macOS iPhone camera:
+
+```bash
+python edge/detect.py \
+  --camera iphone \
+  --stage2-model runs/stage2_cls/yolov8n_stage2/weights/best.pt \
+  --post
+```
+
+`--camera iphone` is macOS-only and expects an available Continuity Camera / iPhone camera device.
+
 Optional Stage 1 detector:
 
 ```bash

@@ -93,6 +93,14 @@ python ml/evaluate.py --stage2 --compare \
   runs/stage2_cls/yolov8m_stage2/weights/best.pt
 ```
 
+Run one-off prediction:
+
+```bash
+python ml/predict.py --weights runs/stage2_cls/yolov8n_stage2/weights/best.pt --source samples/demo.jpg
+python ml/predict.py --stage1 --weights runs/stage1_det/yolov8n_stage1/weights/best.pt --source samples/demo.jpg
+python ml/predict.py --single-model --weights runs/detect/train/weights/best.pt --source samples/demo.jpg
+```
+
 The deployed/default runtime remains two-stage. The single-model detector exists only for ML-side comparison against the separate Stage 1 + Stage 2 approach.
 
 ## Edge Demo
@@ -112,6 +120,15 @@ python edge/detect.py \
   --post \
   --save-annotated logs/demo-annotated.jpg
 ```
+
+Run live camera inference:
+
+```bash
+python edge/detect.py --camera 0 --stage2-model runs/stage2_cls/yolov8n_stage2/weights/best.pt --post
+python edge/detect.py --camera iphone --stage2-model runs/stage2_cls/yolov8n_stage2/weights/best.pt --post
+```
+
+`--camera iphone` is macOS-only and targets Continuity Camera / attached iPhone cameras.
 
 ## Docs
 

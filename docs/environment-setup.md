@@ -65,3 +65,11 @@ python -c "import cv2, ultralytics, yaml; print('env ok')"
 ```
 
 4. Start with dataset preparation and the first YOLO baseline
+
+## One-Off Prediction
+
+Use the standalone prediction CLI when you want a quick model output without running the full edge pipeline:
+
+```bash
+python ml/predict.py --weights runs/stage2_cls/yolov8n_stage2/weights/best.pt --source samples/demo.jpg
+```
