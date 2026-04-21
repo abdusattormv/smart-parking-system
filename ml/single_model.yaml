@@ -1,4 +1,4 @@
-path: /Users/thebkht/Projects/smart-parking-system/single_model_data
+path: /Users/thebkht/Projects/smart-parking-system/datasets/single_model_data_boxes
 train: train/images
 val: valid/images
 test: test/images

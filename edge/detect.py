@@ -39,6 +39,7 @@ DEFAULT_LOG_FORMAT = "json"
 DEFAULT_STAGE2_THRESHOLD = 0.5
 DEFAULT_CONFIG_PATH = Path(__file__).parent / "config.yaml"
 DEFAULT_CAMERA_PROBE_LIMIT = 10
+DEFAULT_STAGE2_LOCAL_CHECKPOINT = "runs/stage2_cls/yolov8n_stage2/weights/best.pt"
 
 DEFAULT_ROIS: Dict[str, Tuple[int, int, int, int]] = {
     "spot_1": (50, 100, 200, 250),
@@ -151,6 +152,15 @@ def resolve_settings(args: argparse.Namespace, cfg: dict) -> argparse.Namespace:
         args.stage2_threshold = post_cfg.get(
             "classifier_threshold", DEFAULT_STAGE2_THRESHOLD
         )
+    configured_stage2_path = Path(str(args.stage2_model))
+    if not configured_stage2_path.exists():
+        local_stage2_checkpoint = Path(DEFAULT_STAGE2_LOCAL_CHECKPOINT)
+        if local_stage2_checkpoint.exists():
+            args.stage2_model = str(local_stage2_checkpoint)
+            print(
+                f"Stage 2 model not found at {configured_stage2_path}; "
+                f"using {local_stage2_checkpoint}."
+            )
     return args
 
 
@@ -297,18 +307,18 @@ def annotate_frame(
             continue
         x1, y1, x2, y2 = box
         color = (255, 0, 255) if status == "occupied" else (47, 255, 173)
+        text_color = (255, 255, 255) if status == "occupied" else (0, 0, 0)
         confidence = confidences.get(spot_id, 0.0)
         cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 1)
-        cv2.putText(
-            annotated,
-            f"{spot_id}: {status} ({confidence:.2f})",
-            (x1, max(12, y1 - 6)),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.45,
-            color,
-            1,
-            cv2.LINE_AA,
-        )
+        label = f"{int(confidence * 100)}%"
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 0.38
+        thickness = 1
+        (tw, th), baseline = cv2.getTextSize(label, font, font_scale, thickness)
+        tx, ty = x1, y1 -6
+        cv2.rectangle(annotated, (tx - 1, ty - th - 1), (tx + tw + 1, ty + baseline), color, -1)
+        cv2.putText(annotated, label, (tx, ty), font, font_scale, text_color, thickness, cv2.LINE_AA)
+
     return annotated
 
 
@@ -487,9 +497,12 @@ def run_camera(args: argparse.Namespace, fixed_rois: Dict[str, Tuple[int, int, i
                 break
 
             started_at = time.perf_counter()
-            payload, _ = run_pipeline(frame, fixed_rois, stage1_model, stage2_model, smooth_buf, args)
+            payload, spot_boxes = run_pipeline(frame, fixed_rois, stage1_model, stage2_model, smooth_buf, args)
 
             if time.perf_counter() - last_post >= args.post_interval:
+                annotated = annotate_frame(frame, payload["spots"], spot_boxes, payload["confidence"])
+                cv2.imwrite(f"logs/annotated_{payload['timestamp'].replace(':', '-')}.jpg", annotated)
+
                 print(json.dumps(payload))
                 log_result(payload, Path(args.log_dir), args.log_format)
                 if args.post:
