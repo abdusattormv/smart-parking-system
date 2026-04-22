@@ -106,3 +106,4 @@ This generates:
 
 - `artifacts/final_manifest.json`
 - `docs/final-artifact-summary.md`
+
