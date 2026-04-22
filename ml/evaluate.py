@@ -37,6 +37,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--weights", help="Path to model checkpoint (.pt or .onnx).")
     parser.add_argument("--data", default=None, help="Stage 1 YAML or Stage 2 dataset root.")
     parser.add_argument("--imgsz", type=int, default=64)
+    parser.add_argument(
+        "--batch",
+        type=int,
+        default=64,
+        help="Stage 2 evaluation batch size for classifier inference.",
+    )
     parser.add_argument("--device", default="mps")
     parser.add_argument("--log-dir", default=DEFAULT_LOG_DIR)
     mode = parser.add_mutually_exclusive_group(required=True)
@@ -181,6 +187,31 @@ def classification_samples(dataset_dir: Path) -> list[tuple[Path, str]]:
     return samples
 
 
+def stage2_probabilities(
+    weights: str,
+    dataset_dir: Path,
+    *,
+    device: str,
+    imgsz: int,
+    batch: int,
+) -> list[tuple[str, float]]:
+    model = YOLO(weights)
+    probabilities: list[tuple[str, float]] = []
+    samples = classification_samples(dataset_dir)
+
+    for start in range(0, len(samples), batch):
+        chunk = samples[start:start + batch]
+        results = model(
+            [str(image_path) for image_path, _expected in chunk],
+            device=device,
+            imgsz=imgsz,
+            verbose=False,
+        )
+        for (_image_path, expected), result in zip(chunk, results):
+            probabilities.append((expected, occupied_probability(result)))
+    return probabilities
+
+
 def occupied_probability(result) -> float:
     names = {int(k): v for k, v in result.names.items()}
     occupied_index = next((idx for idx, name in names.items() if name == "occupied"), None)
@@ -191,21 +222,15 @@ def occupied_probability(result) -> float:
     return float(result.probs.data[occupied_index])
 
 
-def classify_dataset(
-    weights: str,
-    dataset_dir: Path,
+def classify_probabilities(
+    probabilities: list[tuple[str, float]],
     *,
-    device: str,
-    imgsz: int,
     threshold: float,
 ) -> dict[str, object]:
-    model = YOLO(weights)
     y_true: list[str] = []
     y_pred: list[str] = []
 
-    for image_path, expected in classification_samples(dataset_dir):
-        result = model(str(image_path), device=device, imgsz=imgsz, verbose=False)[0]
-        occ_prob = occupied_probability(result)
+    for expected, occ_prob in probabilities:
         predicted = "occupied" if occ_prob >= threshold else "free"
         y_true.append(expected)
         y_pred.append(predicted)
@@ -226,6 +251,25 @@ def classify_dataset(
         "confusion_matrix": matrix.tolist(),
         "sample_count": len(y_true),
     }
+
+
+def classify_dataset(
+    weights: str,
+    dataset_dir: Path,
+    *,
+    device: str,
+    imgsz: int,
+    threshold: float,
+    batch: int,
+) -> dict[str, object]:
+    probabilities = stage2_probabilities(
+        weights,
+        dataset_dir,
+        device=device,
+        imgsz=imgsz,
+        batch=batch,
+    )
+    return classify_probabilities(probabilities, threshold=threshold)
 
 
 def evaluate_stage1(args: argparse.Namespace) -> None:
@@ -299,6 +343,7 @@ def evaluate_stage2(weights: str, dataset_dir: Path, args: argparse.Namespace, l
         device=args.device,
         imgsz=args.imgsz,
         threshold=args.confidence_threshold,
+        batch=args.batch,
     )
     return {
         "model": Path(weights).parent.parent.name if Path(weights).exists() else Path(weights).name,
@@ -403,11 +448,31 @@ def evaluate_threshold_sweep(args: argparse.Namespace) -> None:
         raise SystemExit("--weights is required for threshold sweep.")
     root = stage2_root(args.data)
     dataset_dir = eval_split_dir(root, args.split)
+    probabilities = stage2_probabilities(
+        args.weights,
+        dataset_dir,
+        device=args.device,
+        imgsz=args.imgsz,
+        batch=args.batch,
+    )
     rows = []
     best_row = None
     for step in range(10, 95, 5):
-        args.confidence_threshold = round(step / 100, 2)
-        row = evaluate_stage2(args.weights, dataset_dir, args, f"{root.name}/{args.split}")
+        threshold = round(step / 100, 2)
+        metrics = classify_probabilities(probabilities, threshold=threshold)
+        row = {
+            "model": Path(args.weights).parent.parent.name if Path(args.weights).exists() else Path(args.weights).name,
+            "dataset": f"{root.name}/{args.split}",
+            "threshold": threshold,
+            "top1_accuracy": metrics["top1_accuracy"],
+            "precision": metrics["precision"],
+            "recall": metrics["recall"],
+            "f1": metrics["f1"],
+            "sample_count": metrics["sample_count"],
+            "support_free": metrics["support"]["free"],
+            "support_occupied": metrics["support"]["occupied"],
+            "confusion_matrix": json.dumps(metrics["confusion_matrix"]),
+        }
         rows.append(row)
         if best_row is None or row["f1"] > best_row["f1"]:
             best_row = dict(row)

@@ -17,8 +17,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Summarize smart parking final artifacts.")
     parser.add_argument("--stage1-report", default="datasets/stage1_data/detection_dataset_report.json")
     parser.add_argument("--stage2-dir", default="datasets/stage2_data")
-    parser.add_argument("--pklot-test", default="pklot_test")
-    parser.add_argument("--cnrpark-test", default="cnrpark_test")
+    parser.add_argument("--pklot-test", default="datasets/pklot_test")
+    parser.add_argument("--cnrpark-test", default="datasets/cnrpark_test")
     parser.add_argument("--logs-dir", default="logs")
     parser.add_argument("--runs-dir", default="runs")
     parser.add_argument("--artifacts-dir", default="artifacts")
@@ -33,12 +33,49 @@ def read_json(path: Path) -> dict[str, Any] | None:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def latest_csv_row(path: Path) -> dict[str, Any] | None:
+def csv_rows(path: Path) -> list[dict[str, Any]]:
     if not path.exists():
-        return None
+        return []
     with open(path, newline="", encoding="utf-8") as handle:
-        rows = list(csv.DictReader(handle))
+        rows = list(csv.DictReader(handle, skipinitialspace=True))
+
+    normalized_rows: list[dict[str, Any]] = []
+    for row in rows:
+        normalized: dict[str, Any] = {}
+        for key, value in row.items():
+            if key is None:
+                continue
+            clean_key = key.strip()
+            if isinstance(value, str):
+                normalized[clean_key] = value.strip()
+            else:
+                normalized[clean_key] = value
+        if normalized:
+            normalized_rows.append(normalized)
+    return normalized_rows
+
+
+def latest_csv_row(path: Path) -> dict[str, Any] | None:
+    rows = csv_rows(path)
     return rows[-1] if rows else None
+
+
+def best_csv_row(path: Path, score_key: str) -> dict[str, Any] | None:
+    rows = csv_rows(path)
+    if not rows:
+        return None
+
+    best = None
+    best_score = float("-inf")
+    for row in rows:
+        try:
+            score = float(row.get(score_key, "nan"))
+        except (TypeError, ValueError):
+            continue
+        if score >= best_score:
+            best = row
+            best_score = score
+    return best or rows[-1]
 
 
 def count_images(path: Path) -> int:
@@ -138,8 +175,8 @@ def load_metrics(logs_dir: Path) -> dict[str, Any]:
     return {
         "stage1_evaluation": latest_csv_row(logs_dir / "stage1_evaluation.csv"),
         "stage2_evaluation": latest_csv_row(logs_dir / "stage2_evaluation.csv"),
-        "stage2_model_comparison": latest_csv_row(logs_dir / "stage2_model_comparison.csv"),
-        "stage2_threshold_sweep": latest_csv_row(logs_dir / "stage2_threshold_sweep.csv"),
+        "stage2_model_comparison": best_csv_row(logs_dir / "stage2_model_comparison.csv", "f1"),
+        "stage2_threshold_sweep": best_csv_row(logs_dir / "stage2_threshold_sweep.csv", "f1"),
         "stage2_cross_dataset": latest_csv_row(logs_dir / "stage2_cross_dataset.csv"),
         "stage2_per_weather": latest_csv_row(logs_dir / "stage2_per_weather.csv"),
         "benchmark_results": read_json(logs_dir / "benchmark_results.json"),

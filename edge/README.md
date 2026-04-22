@@ -36,7 +36,7 @@ Static image:
 ```bash
 python edge/detect.py \
   --image samples/demo.jpg \
-  --stage2-model runs/stage2_cls/yolov8n_stage2/weights/best.pt \
+  --stage2-model runs/stage2_cls/yolov8m_stage2/weights/best.pt \
   --save-annotated logs/annotated.jpg
 ```
 
@@ -45,7 +45,7 @@ Live camera:
 ```bash
 python edge/detect.py \
   --camera 0 \
-  --stage2-model runs/stage2_cls/yolov8n_stage2/weights/best.pt \
+  --stage2-model runs/stage2_cls/yolov8m_stage2/weights/best.pt \
   --post
 ```
 
@@ -56,7 +56,7 @@ Override the streamed frame target if needed:
 ```bash
 python edge/detect.py \
   --camera 0 \
-  --stage2-model runs/stage2_cls/yolov8n_stage2/weights/best.pt \
+  --stage2-model runs/stage2_cls/yolov8m_stage2/weights/best.pt \
   --latest-frame-path logs/latest_frame.jpg
 ```
 
@@ -65,7 +65,7 @@ If the live stream feels laggy, lower the stream cost without changing inference
 ```bash
 python edge/detect.py \
   --camera 0 \
-  --stage2-model runs/stage2_cls/yolov8n_stage2/weights/best.pt \
+  --stage2-model runs/stage2_cls/yolov8m_stage2/weights/best.pt \
   --stream-max-width 640 \
   --stream-jpeg-quality 55
 ```
@@ -75,7 +75,7 @@ macOS iPhone camera:
 ```bash
 python edge/detect.py \
   --camera iphone \
-  --stage2-model runs/stage2_cls/yolov8n_stage2/weights/best.pt \
+  --stage2-model runs/stage2_cls/yolov8m_stage2/weights/best.pt \
   --post
 ```
 
@@ -87,8 +87,8 @@ Optional Stage 1 detector:
 python edge/detect.py \
   --image samples/demo.jpg \
   --stage1-detector \
-  --stage1-model runs/stage1_det/yolov8n_stage1/weights/best.pt \
-  --stage2-model runs/stage2_cls/yolov8n_stage2/weights/best.pt
+  --stage1-model runs/stage1_det/yolov8s_stage1/weights/best.pt \
+  --stage2-model runs/stage2_cls/yolov8m_stage2/weights/best.pt
 ```
 
 ## Payload Contract

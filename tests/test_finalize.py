@@ -105,3 +105,43 @@ def test_write_markdown_emits_summary_file(tmp_path):
     assert "Stage 2 `yolov8s-cls`" in text
     assert "Weather Export" in text
     assert "stage1_detector_checkpoint: PASS" in text
+
+
+def test_latest_csv_row_tolerates_legacy_spaced_csv(tmp_path):
+    csv_path = tmp_path / "stage2_cross_dataset.csv"
+    csv_path.write_text(
+        "model         , dataset     , threshold, top1_accuracy, precision, recall, f1 , sample_count, support_free, support_occupied, confusion_matrix\n"
+        "yolov8n_stage2, cnrpark_test,       0.5,        0.8983,     0.974, 0.8364, 0.9,        21746,         9849,            11897, \"[[9583, 266], [1946, 9951]]\"\n",
+        encoding="utf-8",
+    )
+
+    row = finalize.latest_csv_row(csv_path)
+
+    assert row == {
+        "model": "yolov8n_stage2",
+        "dataset": "cnrpark_test",
+        "threshold": "0.5",
+        "top1_accuracy": "0.8983",
+        "precision": "0.974",
+        "recall": "0.8364",
+        "f1": "0.9",
+        "sample_count": "21746",
+        "support_free": "9849",
+        "support_occupied": "11897",
+        "confusion_matrix": "[[9583, 266], [1946, 9951]]",
+    }
+
+
+def test_best_csv_row_selects_highest_metric(tmp_path):
+    csv_path = tmp_path / "stage2_threshold_sweep.csv"
+    csv_path.write_text(
+        "model,f1,threshold\n"
+        "a,0.81,0.3\n"
+        "a,0.92,0.1\n"
+        "a,0.88,0.5\n",
+        encoding="utf-8",
+    )
+
+    row = finalize.best_csv_row(csv_path, "f1")
+
+    assert row == {"model": "a", "f1": "0.92", "threshold": "0.1"}

@@ -30,7 +30,9 @@ class FakeYOLO:
     def __init__(self, _weights: str):
         pass
 
-    def __call__(self, image_path: str, **_kwargs):
+    def __call__(self, image_path, **_kwargs):
+        if isinstance(image_path, list):
+            return [FakeResult(self.probs_by_name[Path(path).name]) for path in image_path]
         return [FakeResult(self.probs_by_name[Path(image_path).name])]
 
     def val(self, **_kwargs):
@@ -60,6 +62,7 @@ def test_classify_dataset_reports_classification_metrics(tmp_path, monkeypatch):
         device="cpu",
         imgsz=64,
         threshold=0.5,
+        batch=16,
     )
 
     assert metrics["top1_accuracy"] == 1.0

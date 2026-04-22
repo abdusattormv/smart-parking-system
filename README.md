@@ -25,7 +25,7 @@ The final-project default is now:
 
 - Stage 2 dataset: `stage2_data/`
 - Weather export for CNR evaluation: `datasets/stage2_weather/`
-- Cross-dataset exports: `pklot_test/`, `cnrpark_test/`
+- Cross-dataset exports: `datasets/pklot_test/`, `datasets/cnrpark_test/`
 - Stage 2 training handoff: `runs/stage2_cls/.../weights/best.pt`
 - Backend payload:
 
@@ -101,6 +101,12 @@ python ml/train.py --stage2 --variant s --device mps
 python ml/train.py --stage2 --variant m --device mps
 ```
 
+Current final artifact choice:
+
+- deployed Stage 1 detector path: `runs/stage1_det/yolov8s_stage1/weights/best.pt`
+- strongest Stage 2 classifier from the saved comparison logs: `runs/stage2_cls/yolov8m_stage2/weights/best.pt`
+- current exported inference artifacts: `artifacts/models/best.pt`, `artifacts/models/best.onnx`, `artifacts/models/best_int8.onnx`
+
 Generate a final artifact summary after training and evaluation:
 
 ```bash
@@ -117,21 +123,26 @@ Accuracy notes:
 Evaluate Stage 2 classification:
 
 ```bash
-python ml/evaluate.py --stage2 --weights runs/stage2_cls/yolov8n_stage2/weights/best.pt --split val
-python ml/evaluate.py --stage2 --weights runs/stage2_cls/yolov8n_stage2/weights/best.pt --cross-dataset pklot_test
-python ml/evaluate.py --stage2 --weights runs/stage2_cls/yolov8n_stage2/weights/best.pt --cross-dataset cnrpark_test
-python ml/evaluate.py --stage2 --weights runs/stage2_cls/yolov8n_stage2/weights/best.pt --data datasets/stage2_weather --per-weather
+python ml/evaluate.py --stage2 --weights runs/stage2_cls/yolov8m_stage2/weights/best.pt --split val --device mps --batch 256
+python ml/evaluate.py --stage2 --weights runs/stage2_cls/yolov8m_stage2/weights/best.pt --cross-dataset datasets/pklot_test --device mps --batch 256
+python ml/evaluate.py --stage2 --weights runs/stage2_cls/yolov8m_stage2/weights/best.pt --cross-dataset datasets/cnrpark_test --device mps --batch 256
+python ml/evaluate.py --stage2 --weights runs/stage2_cls/yolov8m_stage2/weights/best.pt --data datasets/stage2_weather --per-weather --device mps --batch 512
+python ml/evaluate.py --stage2 --weights runs/stage2_cls/yolov8m_stage2/weights/best.pt --split val --device mps --batch 256 --sweep
 python ml/evaluate.py --stage2 --compare \
   runs/stage2_cls/yolov8n_stage2/weights/best.pt \
   runs/stage2_cls/yolov8s_stage2/weights/best.pt \
-  runs/stage2_cls/yolov8m_stage2/weights/best.pt
+  runs/stage2_cls/yolov8m_stage2/weights/best.pt \
+  --split val --device mps --batch 256
 ```
+
+The saved threshold sweep currently selects `0.1` as the best offline validation threshold for `yolov8m_stage2`.
+The deployed edge config still uses `0.3`, which matches the saved comparison run and is less aggressive for live demos.
 
 Run one-off prediction:
 
 ```bash
-python ml/predict.py --weights runs/stage2_cls/yolov8n_stage2/weights/best.pt --source samples/demo.jpg
-python ml/predict.py --stage1 --weights runs/stage1_det/yolov8n_stage1/weights/best.pt --source samples/demo.jpg
+python ml/predict.py --weights runs/stage2_cls/yolov8m_stage2/weights/best.pt --source samples/demo.jpg
+python ml/predict.py --stage1 --weights runs/stage1_det/yolov8s_stage1/weights/best.pt --source samples/demo.jpg
 python ml/predict.py --single-model --weights runs/detect/train/weights/best.pt --source samples/demo.jpg
 ```
 
@@ -156,7 +167,7 @@ Run image inference with fixed ROIs:
 ```bash
 python edge/detect.py \
   --image samples/demo.jpg \
-  --stage2-model runs/stage2_cls/yolov8n_stage2/weights/best.pt \
+  --stage2-model runs/stage2_cls/yolov8m_stage2/weights/best.pt \
   --post \
   --save-annotated logs/demo-annotated.jpg
 ```
@@ -168,7 +179,7 @@ python edge/detect.py \
   --image samples/demo.jpg \
   --stage1-detector \
   --stage1-model runs/stage1_det/yolov8s_stage1/weights/best.pt \
-  --stage2-model runs/stage2_cls/yolov8s_stage2/weights/best.pt \
+  --stage2-model runs/stage2_cls/yolov8m_stage2/weights/best.pt \
   --post \
   --save-annotated logs/final-demo-annotated.jpg
 ```
@@ -179,28 +190,31 @@ Benchmark the Stage 2 classifier on a representative ROI patch:
 python edge/benchmark.py \
   --task classify \
   --image samples/demo.jpg \
-  --model runs/stage2_cls/yolov8s_stage2/weights/best.pt \
+  --model runs/stage2_cls/yolov8m_stage2/weights/best.pt \
   --imgsz 64 \
   --roi 50 100 200 250
 ```
 
-Run the timed stability test:
+Run the short reproducible stability check that generated the current summary:
 
 ```bash
 python edge/stability_test.py \
   --image samples/demo.jpg \
   --stage1-detector \
   --stage1-model runs/stage1_det/yolov8s_stage1/weights/best.pt \
-  --stage2-model runs/stage2_cls/yolov8s_stage2/weights/best.pt \
-  --post \
-  --duration 1800
+  --stage2-model runs/stage2_cls/yolov8m_stage2/weights/best.pt \
+  --device mps \
+  --duration 15 \
+  --frame-interval 500
 ```
+
+For the longer Week 7 soak test, keep the same command and raise `--duration` to `1800`.
 
 Run live camera inference:
 
 ```bash
-python edge/detect.py --camera 0 --stage2-model runs/stage2_cls/yolov8n_stage2/weights/best.pt --post
-python edge/detect.py --camera iphone --stage2-model runs/stage2_cls/yolov8n_stage2/weights/best.pt --post
+python edge/detect.py --camera 0 --stage2-model runs/stage2_cls/yolov8m_stage2/weights/best.pt --post
+python edge/detect.py --camera iphone --stage2-model runs/stage2_cls/yolov8m_stage2/weights/best.pt --post
 ```
 
 `--camera iphone` is macOS-only and targets Continuity Camera / attached iPhone cameras.

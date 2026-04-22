@@ -2,6 +2,7 @@ import sys
 from types import SimpleNamespace
 from pathlib import Path
 
+import cv2
 import numpy as np
 import pytest
 
@@ -190,7 +191,15 @@ def test_run_pipeline_uses_shared_postprocess_path():
     args = type(
         "Args",
         (),
-        {"device": "cpu", "stage1_detector": False, "stage2_threshold": 0.5},
+        {
+            "device": "cpu",
+            "stage1_detector": False,
+            "stage2_threshold": 0.5,
+            "stage1_sahi": True,
+            "stage1_imgsz": 1280,
+            "stage1_slice_size": 640,
+            "stage1_overlap": 0.2,
+        },
     )()
 
     payload, spot_boxes = run_pipeline(

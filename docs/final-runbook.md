@@ -4,6 +4,12 @@ This runbook matches the final required architecture:
 
 `trained Stage 1 detector -> crop -> trained Stage 2 classifier -> smoothing -> JSON -> FastAPI`
 
+Current checked-in final artifact choices:
+
+- Stage 1 detector for integrated runtime: `runs/stage1_det/yolov8s_stage1/weights/best.pt`
+- strongest saved Stage 2 classifier: `runs/stage2_cls/yolov8m_stage2/weights/best.pt`
+- exported deployment bundle: `artifacts/models/best.pt`, `artifacts/models/best.onnx`, `artifacts/models/best_int8.onnx`
+
 ## 1. Prepare Datasets
 
 ```bash
@@ -35,30 +41,33 @@ python ml/train.py --stage2 --variant m --device mps
 
 ```bash
 python ml/evaluate.py --stage1 --weights runs/stage1_det/yolov8s_stage1/weights/best.pt --split val --device mps
-python ml/evaluate.py --stage2 --weights runs/stage2_cls/yolov8s_stage2/weights/best.pt --split val --device mps
-python ml/evaluate.py --stage2 --split val --device mps --compare \
+python ml/evaluate.py --stage2 --weights runs/stage2_cls/yolov8m_stage2/weights/best.pt --split val --device mps --batch 256
+python ml/evaluate.py --stage2 --split val --device mps --batch 256 --compare \
   runs/stage2_cls/yolov8n_stage2/weights/best.pt \
   runs/stage2_cls/yolov8s_stage2/weights/best.pt \
   runs/stage2_cls/yolov8m_stage2/weights/best.pt
-python ml/evaluate.py --stage2 --weights runs/stage2_cls/yolov8s_stage2/weights/best.pt --split val --device mps --sweep
+python ml/evaluate.py --stage2 --weights runs/stage2_cls/yolov8m_stage2/weights/best.pt --split val --device mps --batch 256 --sweep
 ```
 
 Cross-dataset evaluation, when exports are available:
 
 ```bash
-python ml/evaluate.py --stage2 --weights runs/stage2_cls/yolov8s_stage2/weights/best.pt --cross-dataset pklot_test --device mps
-python ml/evaluate.py --stage2 --weights runs/stage2_cls/yolov8s_stage2/weights/best.pt --cross-dataset cnrpark_test --device mps
-python ml/evaluate.py --stage2 --weights runs/stage2_cls/yolov8s_stage2/weights/best.pt --data datasets/stage2_weather --per-weather --device mps
+python ml/evaluate.py --stage2 --weights runs/stage2_cls/yolov8m_stage2/weights/best.pt --cross-dataset datasets/pklot_test --device mps --batch 256
+python ml/evaluate.py --stage2 --weights runs/stage2_cls/yolov8m_stage2/weights/best.pt --cross-dataset datasets/cnrpark_test --device mps --batch 256
+python ml/evaluate.py --stage2 --weights runs/stage2_cls/yolov8m_stage2/weights/best.pt --data datasets/stage2_weather --per-weather --device mps --batch 512
 ```
+
+The saved sweep artifact currently identifies `0.1` as the best validation threshold for `yolov8m_stage2`.
+The deployed edge config remains at `0.3`, which is the threshold used in the saved model-comparison and runtime demo path.
 
 ## 4. Export + Benchmark
 
 ```bash
-python ml/export.py --weights runs/stage2_cls/yolov8s_stage2/weights/best.pt --imgsz 64
+python ml/export.py --weights runs/stage2_cls/yolov8m_stage2/weights/best.pt --imgsz 64
 python edge/benchmark.py \
   --task classify \
   --image samples/demo.jpg \
-  --model runs/stage2_cls/yolov8s_stage2/weights/best.pt \
+  --model runs/stage2_cls/yolov8m_stage2/weights/best.pt \
   --imgsz 64 \
   --roi 50 100 200 250
 python ml/bandwidth.py
@@ -79,22 +88,25 @@ python edge/detect.py \
   --image samples/demo.jpg \
   --stage1-detector \
   --stage1-model runs/stage1_det/yolov8s_stage1/weights/best.pt \
-  --stage2-model runs/stage2_cls/yolov8s_stage2/weights/best.pt \
+  --stage2-model runs/stage2_cls/yolov8m_stage2/weights/best.pt \
   --post \
   --save-annotated logs/final-demo-annotated.jpg
 ```
 
-Run stability test:
+Run the short reproducible stability check used for the checked-in summary:
 
 ```bash
 python edge/stability_test.py \
   --image samples/demo.jpg \
   --stage1-detector \
   --stage1-model runs/stage1_det/yolov8s_stage1/weights/best.pt \
-  --stage2-model runs/stage2_cls/yolov8s_stage2/weights/best.pt \
-  --post \
-  --duration 1800
+  --stage2-model runs/stage2_cls/yolov8m_stage2/weights/best.pt \
+  --device mps \
+  --duration 15 \
+  --frame-interval 500
 ```
+
+For the formal Week 7 soak test, rerun the same command with `--duration 1800` and add `--post` if backend verification is part of the test.
 
 ## 6. Final Packaging
 
@@ -106,4 +118,3 @@ This generates:
 
 - `artifacts/final_manifest.json`
 - `docs/final-artifact-summary.md`
-
