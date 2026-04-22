@@ -106,7 +106,18 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_BACKEND_RETRY_DELAY_S,
         help="Seconds to wait before retrying backend POST after a failure.",
     )
-    parser.add_argument("--post", action="store_true", help="POST payloads to the backend.")
+    parser.add_argument(
+        "--post",
+        action="store_true",
+        default=None,
+        help="POST payloads to the backend. Enabled by default for the integrated pipeline.",
+    )
+    parser.add_argument(
+        "--no-post",
+        action="store_false",
+        dest="post",
+        help="Disable backend POSTs and run detect in local-only mode.",
+    )
     parser.add_argument(
         "--save-annotated",
         help="Path to save an annotated output image in image mode.",
@@ -221,6 +232,8 @@ def resolve_settings(args: argparse.Namespace, cfg: dict) -> argparse.Namespace:
         args.backend_retry_delay = backend_cfg.get(
             "retry_delay_s", DEFAULT_BACKEND_RETRY_DELAY_S
         )
+    if args.post is None:
+        args.post = backend_cfg.get("enabled", True)
     if args.stream_jpeg_quality == DEFAULT_STREAM_JPEG_QUALITY:
         args.stream_jpeg_quality = stream_cfg.get(
             "jpeg_quality", DEFAULT_STREAM_JPEG_QUALITY

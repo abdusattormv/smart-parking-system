@@ -8,6 +8,7 @@ The edge pipeline follows the v3 architecture:
 
 - fixed ROI boxes are the default Stage 1 path
 - Stage 2 classification is the required model path for normal use
+- backend POSTs are enabled by default, so backend `/status` and `/history` update automatically unless `--no-post` is used
 - smoothing stabilizes only the final occupied/free status
 - confidence values are reported directly from the classifier and are not smoothed
 - image mode and camera mode share the same inference and postprocess logic
@@ -46,7 +47,6 @@ Live camera:
 python edge/detect.py \
   --camera 0 \
   --stage2-model runs/stage2_cls/yolov8m_stage2/weights/best.pt \
-  --post
 ```
 
 The default camera profile is intentionally reduced now: `frame_interval_ms: 500`, `stream.max_width: 640`, `stream.jpeg_quality: 55`, `backend.timeout_s: 0.75`, and `backend.retry_delay_s: 10.0`.
@@ -76,7 +76,6 @@ macOS iPhone camera:
 python edge/detect.py \
   --camera iphone \
   --stage2-model runs/stage2_cls/yolov8m_stage2/weights/best.pt \
-  --post
 ```
 
 `--camera iphone` is macOS-only and expects an available Continuity Camera / iPhone camera device.
@@ -105,4 +104,13 @@ python edge/detect.py \
   },
   "timestamp": "2026-04-21T00:00:00Z"
 }
+```
+
+Run without backend updates only when needed:
+
+```bash
+python edge/detect.py \
+  --image samples/demo.jpg \
+  --stage2-model runs/stage2_cls/yolov8m_stage2/weights/best.pt \
+  --no-post
 ```

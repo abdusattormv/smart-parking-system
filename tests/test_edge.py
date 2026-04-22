@@ -13,9 +13,11 @@ from edge.detect import (
     build_payload,
     classify_patch,
     crop_patch,
+    parse_args,
     resolve_camera_source,
     load_rois,
     normalize_rois,
+    resolve_settings,
     run_pipeline,
     write_latest_frame,
 )
@@ -184,6 +186,20 @@ def test_build_payload_uses_v3_schema():
     assert payload["spots"] == {"spot_1": "free"}
     assert payload["confidence"] == {"spot_1": 0.812}
     assert payload["timestamp"].endswith("Z")
+
+
+def test_post_enabled_by_default(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["detect.py", "--image", "samples/demo.jpg"])
+    args = parse_args()
+    resolved = resolve_settings(args, {})
+    assert resolved.post is True
+
+
+def test_no_post_flag_disables_backend_updates(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["detect.py", "--image", "samples/demo.jpg", "--no-post"])
+    args = parse_args()
+    resolved = resolve_settings(args, {})
+    assert resolved.post is False
 
 
 def test_run_pipeline_uses_shared_postprocess_path():

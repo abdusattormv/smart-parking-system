@@ -168,9 +168,11 @@ Run image inference with fixed ROIs:
 python edge/detect.py \
   --image samples/demo.jpg \
   --stage2-model runs/stage2_cls/yolov8m_stage2/weights/best.pt \
-  --post \
   --save-annotated logs/demo-annotated.jpg
 ```
+
+`detect.py` now posts to the backend by default, so `/status` and `/history` update automatically while the backend is running.
+Use `--no-post` for offline-only inference.
 
 Run the integrated final pipeline with the trained Stage 1 detector:
 
@@ -180,7 +182,6 @@ python edge/detect.py \
   --stage1-detector \
   --stage1-model runs/stage1_det/yolov8s_stage1/weights/best.pt \
   --stage2-model runs/stage2_cls/yolov8m_stage2/weights/best.pt \
-  --post \
   --save-annotated logs/final-demo-annotated.jpg
 ```
 
@@ -213,8 +214,8 @@ For the longer Week 7 soak test, keep the same command and raise `--duration` to
 Run live camera inference:
 
 ```bash
-python edge/detect.py --camera 0 --stage2-model runs/stage2_cls/yolov8m_stage2/weights/best.pt --post
-python edge/detect.py --camera iphone --stage2-model runs/stage2_cls/yolov8m_stage2/weights/best.pt --post
+python edge/detect.py --camera 0 --stage2-model runs/stage2_cls/yolov8m_stage2/weights/best.pt
+python edge/detect.py --camera iphone --stage2-model runs/stage2_cls/yolov8m_stage2/weights/best.pt
 ```
 
 `--camera iphone` is macOS-only and targets Continuity Camera / attached iPhone cameras.
