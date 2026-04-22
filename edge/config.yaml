@@ -10,8 +10,14 @@ stage1:
   match_threshold: 0.3
   detector_path: runs/stage1_det/yolov8s_stage1/weights/best.pt
 input:
-  frame_interval_ms: 250
+  frame_interval_ms: 500
   post_interval_s: 2.0
+backend:
+  timeout_s: 0.75
+  retry_delay_s: 10.0
+stream:
+  max_width: 640
+  jpeg_quality: 55
 postprocess:
   smoothing_window: 5
   classifier_threshold: 0.3

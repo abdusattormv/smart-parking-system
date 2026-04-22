@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
 import platform
 import subprocess
 import time
@@ -31,11 +32,16 @@ from ultralytics import YOLO
 STAGE2_MODEL_DEFAULT = "yolov8n-cls.pt"
 STAGE1_MODEL_DEFAULT = "yolov8n.pt"
 DEFAULT_BACKEND_URL = "http://127.0.0.1:8000/update"
+DEFAULT_BACKEND_TIMEOUT_S = 0.75
+DEFAULT_BACKEND_RETRY_DELAY_S = 10.0
 DEFAULT_SMOOTH_N = 5
-DEFAULT_FRAME_INTERVAL_MS = 250
+DEFAULT_FRAME_INTERVAL_MS = 500
 DEFAULT_POST_INTERVAL_S = 2.0
-DEFAULT_LOG_DIR = Path("logs")
+DEFAULT_LOG_DIR = Path("logs/images")
+DEFAULT_LATEST_FRAME_PATH = DEFAULT_LOG_DIR / "latest_frame.jpg"
 DEFAULT_LOG_FORMAT = "json"
+DEFAULT_STREAM_JPEG_QUALITY = 55
+DEFAULT_STREAM_MAX_WIDTH = 640
 DEFAULT_STAGE2_THRESHOLD = 0.5
 DEFAULT_CONFIG_PATH = Path(__file__).parent / "config.yaml"
 DEFAULT_CAMERA_PROBE_LIMIT = 10
@@ -88,6 +94,18 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--device", default=None, help="Inference device. Default from config.")
     parser.add_argument("--backend-url", default=DEFAULT_BACKEND_URL)
+    parser.add_argument(
+        "--backend-timeout",
+        type=float,
+        default=DEFAULT_BACKEND_TIMEOUT_S,
+        help="HTTP timeout in seconds for backend POSTs.",
+    )
+    parser.add_argument(
+        "--backend-retry-delay",
+        type=float,
+        default=DEFAULT_BACKEND_RETRY_DELAY_S,
+        help="Seconds to wait before retrying backend POST after a failure.",
+    )
     parser.add_argument("--post", action="store_true", help="POST payloads to the backend.")
     parser.add_argument(
         "--save-annotated",
@@ -116,6 +134,23 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--log-dir", default=None)
     parser.add_argument("--log-format", choices=["csv", "json"], default=None)
+    parser.add_argument(
+        "--latest-frame-path",
+        default=str(DEFAULT_LATEST_FRAME_PATH),
+        help="Path to the latest annotated JPEG written for backend MJPEG streaming.",
+    )
+    parser.add_argument(
+        "--stream-jpeg-quality",
+        type=int,
+        default=DEFAULT_STREAM_JPEG_QUALITY,
+        help="JPEG quality for the MJPEG latest-frame file (1-100). Lower is faster.",
+    )
+    parser.add_argument(
+        "--stream-max-width",
+        type=int,
+        default=DEFAULT_STREAM_MAX_WIDTH,
+        help="Resize streamed frames down to this width before JPEG encoding. Use 0 to disable.",
+    )
     parser.add_argument(
         "--stage2-threshold",
         type=float,
@@ -160,6 +195,8 @@ def resolve_settings(args: argparse.Namespace, cfg: dict) -> argparse.Namespace:
     input_cfg = cfg.get("input", {})
     post_cfg = cfg.get("postprocess", {})
     log_cfg = cfg.get("logging", {})
+    stream_cfg = cfg.get("stream", {})
+    backend_cfg = cfg.get("backend", {})
     stage1_cfg = cfg.get("stage1", {})
 
     if args.stage2_model is None:
@@ -178,6 +215,20 @@ def resolve_settings(args: argparse.Namespace, cfg: dict) -> argparse.Namespace:
         args.log_dir = log_cfg.get("output_dir", str(DEFAULT_LOG_DIR))
     if args.log_format is None:
         args.log_format = log_cfg.get("format", DEFAULT_LOG_FORMAT)
+    if args.backend_timeout == DEFAULT_BACKEND_TIMEOUT_S:
+        args.backend_timeout = backend_cfg.get("timeout_s", DEFAULT_BACKEND_TIMEOUT_S)
+    if args.backend_retry_delay == DEFAULT_BACKEND_RETRY_DELAY_S:
+        args.backend_retry_delay = backend_cfg.get(
+            "retry_delay_s", DEFAULT_BACKEND_RETRY_DELAY_S
+        )
+    if args.stream_jpeg_quality == DEFAULT_STREAM_JPEG_QUALITY:
+        args.stream_jpeg_quality = stream_cfg.get(
+            "jpeg_quality", DEFAULT_STREAM_JPEG_QUALITY
+        )
+    if args.stream_max_width == DEFAULT_STREAM_MAX_WIDTH:
+        args.stream_max_width = stream_cfg.get(
+            "max_width", DEFAULT_STREAM_MAX_WIDTH
+        )
     if args.stage2_threshold is None:
         args.stage2_threshold = post_cfg.get(
             "classifier_threshold", DEFAULT_STAGE2_THRESHOLD
@@ -490,8 +541,41 @@ def log_result(payload: Dict[str, Any], log_dir: Path, log_format: str) -> None:
         writer.writerow(row)
 
 
-def post_payload(payload: Dict[str, Any], backend_url: str) -> None:
-    response = requests.post(backend_url, json=payload, timeout=5)
+def _resize_for_stream(frame: np.ndarray, max_width: int) -> np.ndarray:
+    if max_width <= 0:
+        return frame
+    height, width = frame.shape[:2]
+    if width <= max_width:
+        return frame
+    scale = max_width / float(width)
+    resized_height = max(1, int(round(height * scale)))
+    return cv2.resize(frame, (max_width, resized_height), interpolation=cv2.INTER_AREA)
+
+
+def write_latest_frame(
+    frame: np.ndarray,
+    output_path: Path,
+    jpeg_quality: int = DEFAULT_STREAM_JPEG_QUALITY,
+    max_width: int = DEFAULT_STREAM_MAX_WIDTH,
+) -> bool:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    stream_frame = _resize_for_stream(frame, max_width)
+    quality = max(1, min(100, int(jpeg_quality)))
+    success, encoded = cv2.imencode(
+        ".jpg",
+        stream_frame,
+        [int(cv2.IMWRITE_JPEG_QUALITY), quality],
+    )
+    if not success:
+        return False
+    tmp_path = output_path.with_suffix(f"{output_path.suffix}.tmp")
+    tmp_path.write_bytes(encoded.tobytes())
+    os.replace(tmp_path, output_path)
+    return True
+
+
+def post_payload(payload: Dict[str, Any], backend_url: str, timeout: float) -> None:
+    response = requests.post(backend_url, json=payload, timeout=timeout)
     response.raise_for_status()
 
 
@@ -637,7 +721,7 @@ def run_inference(args: argparse.Namespace, fixed_rois: Dict[str, Tuple[int, int
 
     if args.post:
         try:
-            post_payload(payload, args.backend_url)
+            post_payload(payload, args.backend_url, args.backend_timeout)
         except requests.RequestException as exc:
             print(f"Backend POST failed: {exc}")
     return 0
@@ -650,7 +734,9 @@ def run_camera(args: argparse.Namespace, fixed_rois: Dict[str, Tuple[int, int, i
     if not cap.isOpened():
         raise RuntimeError(f"Cannot open camera index {args.camera}")
 
+    latest_frame_path = Path(args.latest_frame_path)
     last_post = time.perf_counter() - args.post_interval
+    backend_retry_after = 0.0
     try:
         while True:
             ok, frame = cap.read()
@@ -660,18 +746,28 @@ def run_camera(args: argparse.Namespace, fixed_rois: Dict[str, Tuple[int, int, i
 
             started_at = time.perf_counter()
             payload, spot_boxes = run_pipeline(frame, fixed_rois, stage1_model, stage2_model, smooth_buf, args)
+            annotated = annotate_frame(frame, payload["spots"], spot_boxes, payload["confidence"])
+            write_latest_frame(
+                annotated,
+                latest_frame_path,
+                jpeg_quality=args.stream_jpeg_quality,
+                max_width=args.stream_max_width,
+            )
 
             if time.perf_counter() - last_post >= args.post_interval:
-                annotated = annotate_frame(frame, payload["spots"], spot_boxes, payload["confidence"])
                 cv2.imwrite(f"logs/annotated_{payload['timestamp'].replace(':', '-')}.jpg", annotated)
 
                 print(json.dumps(payload))
                 log_result(payload, Path(args.log_dir), args.log_format)
                 if args.post:
-                    try:
-                        post_payload(payload, args.backend_url)
-                    except requests.RequestException as exc:
-                        print(f"Backend POST failed: {exc}")
+                    now = time.perf_counter()
+                    if now >= backend_retry_after:
+                        try:
+                            post_payload(payload, args.backend_url, args.backend_timeout)
+                            backend_retry_after = 0.0
+                        except requests.RequestException as exc:
+                            backend_retry_after = now + max(0.0, args.backend_retry_delay)
+                            print(f"Backend POST failed: {exc}")
                 last_post = time.perf_counter()
 
             sleep_seconds = max(0.0, args.frame_interval / 1000.0 - (time.perf_counter() - started_at))

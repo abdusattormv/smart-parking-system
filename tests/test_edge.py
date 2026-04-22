@@ -16,6 +16,7 @@ from edge.detect import (
     load_rois,
     normalize_rois,
     run_pipeline,
+    write_latest_frame,
 )
 
 
@@ -204,3 +205,23 @@ def test_run_pipeline_uses_shared_postprocess_path():
     assert spot_boxes["spot_1"] == (0, 0, 20, 20)
     assert payload["spots"] == {"spot_1": "occupied", "spot_2": "free"}
     assert payload["confidence"] == {"spot_1": 0.9, "spot_2": 0.7}
+
+
+def test_write_latest_frame_writes_jpeg_atomically(tmp_path):
+    output_path = tmp_path / "latest.jpg"
+    frame = np.zeros((16, 16, 3), dtype=np.uint8)
+
+    assert write_latest_frame(frame, output_path) is True
+    assert output_path.exists()
+    assert output_path.with_suffix(".jpg.tmp").exists() is False
+
+
+def test_write_latest_frame_can_downscale_for_stream(tmp_path):
+    output_path = tmp_path / "latest.jpg"
+    frame = np.zeros((40, 120, 3), dtype=np.uint8)
+
+    assert write_latest_frame(frame, output_path, jpeg_quality=60, max_width=60) is True
+    written = cv2.imread(str(output_path))
+
+    assert written is not None
+    assert written.shape[1] == 60

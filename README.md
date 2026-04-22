@@ -145,6 +145,12 @@ Start the backend:
 uvicorn backend.main:app --reload
 ```
 
+Open the live MJPEG stream in a browser:
+
+```html
+<img src="http://127.0.0.1:8000/stream" alt="Parking stream">
+```
+
 Run image inference with fixed ROIs:
 
 ```bash
@@ -198,6 +204,7 @@ python edge/detect.py --camera iphone --stage2-model runs/stage2_cls/yolov8n_sta
 ```
 
 `--camera iphone` is macOS-only and targets Continuity Camera / attached iPhone cameras.
+Camera mode updates `logs/latest_frame.jpg` continuously so `/stream` can render the latest annotated frame without waiting for POST intervals.
 
 ## Docs
 

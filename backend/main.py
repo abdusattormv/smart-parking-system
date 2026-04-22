@@ -2,15 +2,18 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from asyncio import sleep
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Literal
 
 from fastapi import FastAPI
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 app = FastAPI()
 DB = Path("parking.db")
+LATEST_FRAME_PATH = Path("logs/latest_frame.jpg")
 _conn: sqlite3.Connection | None = None
 
 
@@ -58,6 +61,30 @@ def utc_now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+async def generate_mjpeg_stream(
+    frame_path: Path = LATEST_FRAME_PATH,
+    poll_interval: float = 0.1,
+):
+    last_signature: tuple[int, int] | None = None
+    while True:
+        try:
+            stat = frame_path.stat()
+            signature = (stat.st_mtime_ns, stat.st_size)
+            if signature != last_signature:
+                frame_bytes = frame_path.read_bytes()
+                if frame_bytes:
+                    last_signature = signature
+                    yield (
+                        b"--frame\r\n"
+                        b"Content-Type: image/jpeg\r\n\r\n"
+                        + frame_bytes
+                        + b"\r\n"
+                    )
+        except FileNotFoundError:
+            pass
+        await sleep(poll_interval)
+
+
 init_db()
 
 
@@ -96,3 +123,11 @@ async def history(limit: int = 100) -> HistoryResponse:
 @app.get("/health")
 async def health() -> dict:
     return {"status": "ok"}
+
+
+@app.get("/stream")
+async def stream() -> StreamingResponse:
+    return StreamingResponse(
+        generate_mjpeg_stream(),
+        media_type="multipart/x-mixed-replace; boundary=frame",
+    )

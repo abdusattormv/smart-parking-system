@@ -11,6 +11,7 @@ The edge pipeline follows the v3 architecture:
 - smoothing stabilizes only the final occupied/free status
 - confidence values are reported directly from the classifier and are not smoothed
 - image mode and camera mode share the same inference and postprocess logic
+- camera mode also updates `logs/latest_frame.jpg` on every processed frame for backend MJPEG streaming
 
 ## Optional Stage 1 Detector
 
@@ -21,6 +22,9 @@ The edge pipeline follows the v3 architecture:
 Copy [edge/config.example.yaml](/Users/thebkht/Projects/smart-parking-system/edge/config.example.yaml) to `edge/config.yaml` and adjust:
 
 - `model.stage2_path` for the classifier checkpoint
+- `input.frame_interval_ms` to control default camera processing cadence
+- `backend.timeout_s` and `backend.retry_delay_s` to keep camera mode responsive when the backend is slow or unavailable
+- `stream.max_width` and `stream.jpeg_quality` to control default MJPEG cost
 - `postprocess.classifier_threshold` for deployed occupied/free thresholding
 - `postprocess.smoothing_window` for temporal status smoothing
 - `rois` for camera-specific parking spot boxes
@@ -43,6 +47,27 @@ python edge/detect.py \
   --camera 0 \
   --stage2-model runs/stage2_cls/yolov8n_stage2/weights/best.pt \
   --post
+```
+
+The default camera profile is intentionally reduced now: `frame_interval_ms: 500`, `stream.max_width: 640`, `stream.jpeg_quality: 55`, `backend.timeout_s: 0.75`, and `backend.retry_delay_s: 10.0`.
+
+Override the streamed frame target if needed:
+
+```bash
+python edge/detect.py \
+  --camera 0 \
+  --stage2-model runs/stage2_cls/yolov8n_stage2/weights/best.pt \
+  --latest-frame-path logs/latest_frame.jpg
+```
+
+If the live stream feels laggy, lower the stream cost without changing inference:
+
+```bash
+python edge/detect.py \
+  --camera 0 \
+  --stage2-model runs/stage2_cls/yolov8n_stage2/weights/best.pt \
+  --stream-max-width 640 \
+  --stream-jpeg-quality 55
 ```
 
 macOS iPhone camera:

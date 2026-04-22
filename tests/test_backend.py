@@ -1,5 +1,6 @@
 import sqlite3
 import sys
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -87,3 +88,16 @@ def test_invalid_legacy_payload_is_rejected():
     client = TestClient(app)
     response = client.post("/update", json={"spot_1": "occupied", "fps": 10.0})
     assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_generate_mjpeg_stream_wraps_latest_frame(tmp_path):
+    frame_path = tmp_path / "latest.jpg"
+    frame_bytes = b"fake-jpeg"
+    frame_path.write_bytes(frame_bytes)
+
+    stream = backend_module.generate_mjpeg_stream(frame_path=frame_path, poll_interval=0.0)
+    chunk = await asyncio.wait_for(anext(stream), timeout=1)
+
+    assert chunk.startswith(b"--frame\r\nContent-Type: image/jpeg\r\n\r\n")
+    assert chunk.endswith(frame_bytes + b"\r\n")
