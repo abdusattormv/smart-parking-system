@@ -10,6 +10,7 @@ scikit-learn>=1.3,<2.0
 tqdm>=4.66,<5.0
 fastapi>=0.115,<1.0
 uvicorn>=0.30,<1.0
+sahi>=0.11.36
 
 # Dataset conversion helpers
 lxml>=5.1,<6.0

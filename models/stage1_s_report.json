@@ -1,0 +1,30 @@
+{
+  "task": "detect",
+  "track": "stage1",
+  "variant": "s",
+  "model": "yolov8s.pt",
+  "data": "ml\\stage1.yaml",
+  "epochs": 60,
+  "imgsz": 768,
+  "batch": 16,
+  "lr0": 0.003,
+  "patience": 15,
+  "augmentation": {
+    "degrees": 0.0,
+    "fliplr": 0.5,
+    "flipud": 0.0,
+    "scale": 0.15,
+    "erasing": 0.2,
+    "mixup": 0.0,
+    "dropout": 0.0,
+    "cos_lr": false
+  },
+  "train_time_s": 2049.06,
+  "best_ckpt": "runs\\stage1_det\\yolov8s_stage1\\weights\\best.pt",
+  "last_ckpt": "runs\\stage1_det\\yolov8s_stage1\\weights\\last.pt",
+  "selected_ckpt": "runs\\stage1_det\\yolov8s_stage1\\weights\\best.pt",
+  "mAP50": 0.9949841560102958,
+  "mAP50_95": 0.9693237670566148,
+  "precision": 0.9970962788168314,
+  "recall": 0.9969509120020068
+}

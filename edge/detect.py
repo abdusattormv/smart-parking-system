@@ -122,6 +122,36 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Occupied confidence threshold used by the edge classifier.",
     )
+    parser.add_argument(
+    "--stage1-imgsz",
+    type=int,
+    default=None,
+    help="Inference image size for stage1 detector (default: 1280).",
+    )
+    parser.add_argument(
+    "--stage1-sahi",
+    action="store_true",
+    default=True,  # ← on by default
+    help="Use SAHI sliced inference for stage1 (default: enabled).",
+    )
+    parser.add_argument(
+        "--no-stage1-sahi",
+        action="store_false",
+        dest="stage1_sahi",
+        help="Disable SAHI sliced inference for stage1.",
+    )
+    parser.add_argument(
+        "--stage1-slice-size",
+        type=int,
+        default=None,
+        help="SAHI slice size in pixels (default: 640).",
+    )
+    parser.add_argument(
+        "--stage1-overlap",
+        type=float,
+        default=None,
+        help="SAHI slice overlap ratio (default: 0.2).",
+    )
     return parser.parse_args()
 
 
@@ -152,6 +182,15 @@ def resolve_settings(args: argparse.Namespace, cfg: dict) -> argparse.Namespace:
         args.stage2_threshold = post_cfg.get(
             "classifier_threshold", DEFAULT_STAGE2_THRESHOLD
         )
+    if args.stage1_slice_size is None:
+        args.stage1_slice_size = stage1_cfg.get("slice_size", 640)
+    if args.stage1_overlap is None:
+        args.stage1_overlap = stage1_cfg.get("overlap", 0.2)
+    if args.stage1_imgsz is None:
+        args.stage1_imgsz = stage1_cfg.get("imgsz", 1280)
+    # only override from config if user didn't explicitly pass --no-stage1-sahi
+    if args.stage1_sahi:
+        args.stage1_sahi = stage1_cfg.get("use_sahi", True)
     configured_stage2_path = Path(str(args.stage2_model))
     if not configured_stage2_path.exists():
         local_stage2_checkpoint = Path(DEFAULT_STAGE2_LOCAL_CHECKPOINT)
@@ -214,19 +253,58 @@ def get_spot_boxes(
     stage1_model: Optional[YOLO],
     device: str,
     use_stage1_detector: bool,
+    use_sahi: bool = False,
+    stage1_imgsz: int = 1280,
+    slice_size: int = 640,
+    overlap: float = 0.2,           
 ) -> Dict[str, Tuple[int, int, int, int]]:
     if not use_stage1_detector:
         return fixed_rois
     if stage1_model is None:
         raise ValueError("Stage 1 detector requested but no model was loaded.")
 
-    results = stage1_model(frame, device=device, verbose=False)[0]
-    boxes: Dict[str, Tuple[int, int, int, int]] = {}
+    if use_sahi:
+        try:
+            from sahi import AutoDetectionModel
+            from sahi.predict import get_sliced_prediction
+            import tempfile, os
+
+            sahi_model = AutoDetectionModel.from_pretrained(
+                model_type="ultralytics",
+                model_path=stage1_model.ckpt_path,
+                confidence_threshold=0.1,
+                device=device,
+            )
+            # SAHI needs a file path, write frame to temp file
+            with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
+                tmp_path = tmp.name
+            cv2.imwrite(tmp_path, frame)
+            result = get_sliced_prediction(
+                tmp_path,
+                sahi_model,
+                slice_height=slice_size,
+                slice_width=slice_size,
+                overlap_height_ratio=overlap,
+                overlap_width_ratio=overlap,
+                verbose=0,
+            )
+            os.unlink(tmp_path)
+            boxes: Dict[str, Tuple[int, int, int, int]] = {}
+            for index, pred in enumerate(result.object_prediction_list, start=1):
+                b = pred.bbox
+                x1, y1, x2, y2 = int(b.minx), int(b.miny), int(b.maxx), int(b.maxy)
+                if x2 > x1 and y2 > y1:
+                    boxes[f"spot_{index}"] = (x1, y1, x2, y2)
+            return boxes
+        except ImportError:
+            print("SAHI not installed; falling back to standard inference.")
+
+    results = stage1_model(frame, device=device, verbose=False, imgsz=stage1_imgsz)[0]
+    boxes = {}
     for index, box in enumerate(results.boxes.xyxy.cpu().numpy(), start=1):
         x1, y1, x2, y2 = box.astype(int)
-        if x2 <= x1 or y2 <= y1:
-            continue
-        boxes[f"spot_{index}"] = (int(x1), int(y1), int(x2), int(y2))
+        if x2 > x1 and y2 > y1:
+            boxes[f"spot_{index}"] = (int(x1), int(y1), int(x2), int(y2))
     return boxes
 
 
@@ -359,6 +437,10 @@ def run_pipeline(
         stage1_model=stage1_model,
         device=args.device,
         use_stage1_detector=args.stage1_detector,
+        use_sahi=args.stage1_sahi,
+        stage1_imgsz=args.stage1_imgsz,
+        slice_size=args.stage1_slice_size,
+        overlap=args.stage1_overlap,
     )
 
     raw_statuses: Dict[str, str] = {}

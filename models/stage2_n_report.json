@@ -1,0 +1,28 @@
+{
+  "task": "classify",
+  "track": "stage2",
+  "variant": "n",
+  "model": "yolov8n-cls.pt",
+  "data": "datasets\\stage2_data",
+  "epochs": 60,
+  "imgsz": 64,
+  "batch": 64,
+  "lr0": 0.001,
+  "patience": 20,
+  "augmentation": {
+    "degrees": 0.0,
+    "fliplr": 0.5,
+    "flipud": 0.0,
+    "scale": 0.15,
+    "erasing": 0.2,
+    "mixup": 0.0,
+    "dropout": 0.1,
+    "cos_lr": true
+  },
+  "train_time_s": 526.99,
+  "best_ckpt": "runs\\stage2_cls\\yolov8n_stage2\\weights\\best.pt",
+  "last_ckpt": "runs\\stage2_cls\\yolov8n_stage2\\weights\\last.pt",
+  "selected_ckpt": "runs\\stage2_cls\\yolov8n_stage2\\weights\\best.pt",
+  "top1_accuracy": 0.9954589605331421,
+  "top5_accuracy": 1.0
+}
