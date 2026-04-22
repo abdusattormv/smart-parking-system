@@ -10,16 +10,25 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from edge.detect import (
     SmoothingBuffer,
+    box_area,
     build_payload,
     classify_patch,
+    handoff_to_builtin_camera,
     crop_patch,
+    filter_stage1_box,
+    get_spot_boxes,
     parse_args,
+    open_camera_capture,
+    reopen_camera_capture,
+    resolve_camera_runtime,
     resolve_camera_source,
+    roi_bounds,
     load_rois,
     normalize_rois,
     resolve_settings,
     run_pipeline,
     write_latest_frame,
+    DEFAULT_LATEST_FRAME_PATH,
 )
 
 
@@ -60,6 +69,30 @@ class FakeCapture:
         self.released = True
 
 
+class FakeArray:
+    def __init__(self, values):
+        self._values = np.array(values, dtype=float)
+
+    def cpu(self):
+        return self
+
+    def numpy(self):
+        return self._values
+
+
+class FakeDetectResult:
+    def __init__(self, boxes):
+        self.boxes = SimpleNamespace(xyxy=FakeArray(boxes))
+
+
+class FakeDetectYOLO:
+    def __init__(self, boxes):
+        self._boxes = boxes
+
+    def __call__(self, *_args, **_kwargs):
+        return [FakeDetectResult(self._boxes)]
+
+
 def test_normalize_rois_accepts_valid_boxes():
     rois = normalize_rois({"spot_1": [0, 1, 10, 20]})
     assert rois == {"spot_1": (0, 1, 10, 20)}
@@ -74,6 +107,38 @@ def test_load_rois_reads_config(tmp_path):
 def test_resolve_camera_source_accepts_numeric_indexes():
     assert resolve_camera_source("0") == 0
     assert resolve_camera_source("12") == 12
+
+
+def test_open_camera_capture_uses_backend_when_provided(monkeypatch):
+    calls = []
+
+    def fake_video_capture(*args):
+        calls.append(args)
+        return FakeCapture(opens=True, reads=True)
+
+    monkeypatch.setattr("edge.detect.cv2.VideoCapture", fake_video_capture)
+
+    capture = open_camera_capture(1, 1200)
+
+    assert capture.isOpened() is True
+    assert calls == [(1, 1200)]
+
+
+def test_reopen_camera_capture_releases_then_reopens(monkeypatch):
+    calls = []
+    current = FakeCapture(opens=True, reads=True)
+
+    def fake_video_capture(*args):
+        calls.append(args)
+        return FakeCapture(opens=True, reads=True)
+
+    monkeypatch.setattr("edge.detect.cv2.VideoCapture", fake_video_capture)
+
+    reopened = reopen_camera_capture(3, 1200, current)
+
+    assert current.released is True
+    assert reopened.isOpened() is True
+    assert calls == [(3, 1200)]
 
 
 def test_resolve_camera_source_rejects_invalid_tokens():
@@ -111,12 +176,12 @@ def test_resolve_camera_source_uses_matching_iphone_camera(monkeypatch):
 
     def fake_video_capture(index, backend):
         attempted.append((index, backend))
-        return FakeCapture(opens=index == 2, reads=index == 2)
+        return FakeCapture(opens=index in {2, 3}, reads=index in {2, 3})
 
     monkeypatch.setattr("edge.detect.cv2.VideoCapture", fake_video_capture)
 
-    assert resolve_camera_source("iphone", probe_limit=4) == 2
-    assert attempted == [(0, 1200), (1, 1200), (2, 1200)]
+    assert resolve_camera_source("iphone", probe_limit=4) == 3
+    assert attempted == [(0, 1200), (1, 1200), (2, 1200), (3, 1200)]
 
 
 def test_resolve_camera_source_fails_when_no_camera_index_opens(monkeypatch):
@@ -135,6 +200,70 @@ def test_resolve_camera_source_fails_when_no_camera_index_opens(monkeypatch):
 
     with pytest.raises(RuntimeError, match="could not open any AVFoundation camera index"):
         resolve_camera_source("iphone", probe_limit=3)
+
+
+def test_resolve_camera_source_stops_after_miss_streak_once_candidates_exist(monkeypatch):
+    monkeypatch.setattr("edge.detect.platform.system", lambda: "Darwin")
+    monkeypatch.setattr(
+        "edge.detect.subprocess.run",
+        lambda *args, **kwargs: SimpleNamespace(
+            stdout='{"SPCameraDataType": [{"_name": "Continuity Camera"}]}'
+        ),
+    )
+    monkeypatch.setattr("edge.detect._macos_camera_backend", lambda: 1200)
+
+    attempted = []
+    openings = {0: True, 1: True, 2: False, 3: False, 4: True}
+
+    def fake_video_capture(index, backend):
+        attempted.append((index, backend))
+        opens = openings.get(index, False)
+        return FakeCapture(opens=opens, reads=opens)
+
+    monkeypatch.setattr("edge.detect.cv2.VideoCapture", fake_video_capture)
+
+    assert resolve_camera_source("iphone", probe_limit=10) == 1
+    assert attempted == [(0, 1200), (1, 1200), (2, 1200), (3, 1200)]
+
+
+def test_resolve_camera_runtime_includes_builtin_fallback_for_iphone(monkeypatch):
+    monkeypatch.setattr("edge.detect.platform.system", lambda: "Darwin")
+    monkeypatch.setattr("edge.detect._resolve_macos_iphone_camera", lambda probe_limit=10: (3, 0))
+    monkeypatch.setattr("edge.detect._macos_camera_backend", lambda: 1200)
+
+    camera, backend, fallback_camera, fallback_backend, label = resolve_camera_runtime("iphone")
+
+    assert camera == 3
+    assert backend == 1200
+    assert fallback_camera == 0
+    assert fallback_backend == 1200
+    assert label == "iphone"
+
+
+def test_resolve_camera_runtime_handles_numeric_without_fallback():
+    camera, backend, fallback_camera, fallback_backend, label = resolve_camera_runtime("1")
+
+    assert camera == 1
+    assert backend is None
+    assert fallback_camera is None
+    assert fallback_backend is None
+    assert label == "1"
+
+
+def test_handoff_to_builtin_camera_opens_and_releases_capture(monkeypatch):
+    capture = FakeCapture(opens=True, reads=True)
+    calls = []
+
+    def fake_open_camera_capture(index, backend):
+        calls.append((index, backend))
+        return capture
+
+    monkeypatch.setattr("edge.detect.open_camera_capture", fake_open_camera_capture)
+
+    handoff_to_builtin_camera(0, 1200)
+
+    assert calls == [(0, 1200)]
+    assert capture.released is True
 
 
 def test_crop_patch_returns_none_for_invalid_box():
@@ -188,11 +317,102 @@ def test_build_payload_uses_v3_schema():
     assert payload["timestamp"].endswith("Z")
 
 
+def test_roi_bounds_returns_union_box():
+    bounds = roi_bounds({"a": (10, 20, 30, 40), "b": (5, 15, 50, 25)})
+    assert bounds == (5, 15, 50, 40)
+
+
+def test_filter_stage1_box_rejects_small_detections():
+    frame = np.zeros((200, 300, 3), dtype=np.uint8)
+    assert filter_stage1_box(
+        frame.shape,
+        (10, 10, 20, 20),
+        lot_mask=None,
+        min_box_area=150,
+        filter_mode="bounds",
+    ) is None
+
+
+def test_filter_stage1_box_rejects_boxes_outside_lot_mask():
+    frame = np.zeros((200, 300, 3), dtype=np.uint8)
+    lot_mask = (50, 50, 250, 180)
+    assert filter_stage1_box(
+        frame.shape,
+        (0, 60, 80, 120),
+        lot_mask=lot_mask,
+        roi_boxes=None,
+        min_box_area=100,
+        filter_mode="bounds",
+    ) is None
+
+
+def test_filter_stage1_box_rejects_box_between_slots_even_inside_lot_bounds():
+    frame = np.zeros((200, 300, 3), dtype=np.uint8)
+    roi_boxes = [(50, 50, 90, 140), (110, 50, 150, 140)]
+    kept = filter_stage1_box(
+        frame.shape,
+        (92, 60, 108, 130),
+        lot_mask=(50, 50, 150, 140),
+        roi_boxes=roi_boxes,
+        min_box_area=100,
+        filter_mode="roi_center",
+    )
+    assert kept is None
+
+
+def test_filter_stage1_box_bounds_mode_keeps_box_between_slots():
+    frame = np.zeros((200, 300, 3), dtype=np.uint8)
+    kept = filter_stage1_box(
+        frame.shape,
+        (92, 60, 108, 130),
+        lot_mask=(50, 50, 150, 140),
+        roi_boxes=[(50, 50, 90, 140), (110, 50, 150, 140)],
+        min_box_area=100,
+        filter_mode="bounds",
+    )
+    assert kept == (92, 60, 108, 130)
+
+
+def test_box_area_computes_pixel_area():
+    assert box_area((10, 20, 40, 70)) == 1500
+
+
+def test_get_spot_boxes_filters_stage1_detections():
+    frame = np.zeros((300, 400, 3), dtype=np.uint8)
+    fixed_rois = {
+        "spot_1": (100, 100, 160, 180),
+        "spot_2": (170, 100, 230, 180),
+    }
+    stage1 = FakeDetectYOLO(
+        [
+            (105, 105, 155, 175),
+            (0, 0, 20, 20),
+            (162, 105, 168, 175),
+            (250, 220, 360, 290),
+        ]
+    )
+
+    boxes = get_spot_boxes(
+        frame=frame,
+        fixed_rois=fixed_rois,
+        stage1_model=stage1,
+        device="cpu",
+        use_stage1_detector=True,
+        use_sahi=False,
+        min_box_area=1500,
+        filter_mode="bounds",
+    )
+
+    assert boxes == {"spot_1": (105, 105, 155, 175)}
+
+
 def test_post_enabled_by_default(monkeypatch):
     monkeypatch.setattr(sys, "argv", ["detect.py", "--image", "samples/demo.jpg"])
     args = parse_args()
     resolved = resolve_settings(args, {})
     assert resolved.post is True
+    assert resolved.stage1_filter_mode == "bounds"
+    assert resolved.latest_frame_path == str(DEFAULT_LATEST_FRAME_PATH)
 
 
 def test_no_post_flag_disables_backend_updates(monkeypatch):
@@ -215,6 +435,8 @@ def test_run_pipeline_uses_shared_postprocess_path():
             "stage1_imgsz": 1280,
             "stage1_slice_size": 640,
             "stage1_overlap": 0.2,
+            "stage1_min_box_area": 1500,
+            "stage1_filter_mode": "bounds",
         },
     )()
 

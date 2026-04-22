@@ -29,6 +29,7 @@ The backend is a minimal persistence layer for the v3 edge payload. It does not 
 ## Live Stream
 
 `GET /stream` serves `logs/latest_frame.jpg` as a multipart MJPEG response for browser or VLC clients.
+The edge runtime writes to the same path by default.
 
 Example:
 

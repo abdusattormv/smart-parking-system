@@ -12,7 +12,8 @@ The edge pipeline follows the v3 architecture:
 - smoothing stabilizes only the final occupied/free status
 - confidence values are reported directly from the classifier and are not smoothed
 - image mode and camera mode share the same inference and postprocess logic
-- camera mode also updates `logs/latest_frame.jpg` on every processed frame for backend MJPEG streaming
+- camera mode updates `logs/latest_frame.jpg` on every processed frame for backend MJPEG streaming
+- camera mode tolerates short read glitches before stopping, which helps Continuity Camera sessions recover
 
 ## Optional Stage 1 Detector
 
@@ -23,12 +24,21 @@ The edge pipeline follows the v3 architecture:
 Copy [edge/config.example.yaml](/Users/thebkht/Projects/smart-parking-system/edge/config.example.yaml) to `edge/config.yaml` and adjust:
 
 - `model.stage2_path` for the classifier checkpoint
+- `stage1.min_box_area` to reject tiny false-positive Stage 1 boxes such as road markings
+- `stage1.filter_mode` to choose detector spatial filtering:
+  `bounds` for general scenes, `roi_center` for a fixed camera with matched slot ROIs
 - `input.frame_interval_ms` to control default camera processing cadence
 - `backend.timeout_s` and `backend.retry_delay_s` to keep camera mode responsive when the backend is slow or unavailable
 - `stream.max_width` and `stream.jpeg_quality` to control default MJPEG cost
 - `postprocess.classifier_threshold` for deployed occupied/free thresholding
 - `postprocess.smoothing_window` for temporal status smoothing
 - `rois` for camera-specific parking spot boxes
+
+When `--stage1-detector` is enabled, the detector output is filtered in two ways before Stage 2:
+
+- boxes smaller than `stage1.min_box_area` are discarded
+- in `bounds` mode, boxes outside the union of the configured parking `rois` are discarded
+- in `roi_center` mode, a box must also have its center inside one configured slot ROI
 
 ## Commands
 

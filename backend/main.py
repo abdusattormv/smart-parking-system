@@ -64,7 +64,31 @@ def utc_now_iso() -> str:
 async def generate_mjpeg_stream(
     frame_path: Path = LATEST_FRAME_PATH,
     poll_interval: float = 0.1,
+    max_poll_interval: float = 0.5,
 ):
+    last_signature: tuple[int, int] | None = None
+    current_interval = poll_interval
+    while True:
+        try:
+            stat = frame_path.stat()
+            signature = (stat.st_mtime_ns, stat.st_size)
+            if signature != last_signature:
+                frame_bytes = frame_path.read_bytes()
+                if frame_bytes:
+                    last_signature = signature
+                    current_interval = poll_interval  # reset on new frame
+                    yield (
+                        b"--frame\r\n"
+                        b"Content-Type: image/jpeg\r\n\r\n"
+                        + frame_bytes
+                        + b"\r\n"
+                    )
+            else:
+                # Back off when no new frame — reduces file I/O contention
+                current_interval = min(current_interval * 1.2, max_poll_interval)
+        except FileNotFoundError:
+            current_interval = max_poll_interval
+        await sleep(current_interval)
     last_signature: tuple[int, int] | None = None
     while True:
         try:
@@ -130,4 +154,10 @@ async def stream() -> StreamingResponse:
     return StreamingResponse(
         generate_mjpeg_stream(),
         media_type="multipart/x-mixed-replace; boundary=frame",
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+            "X-Content-Type-Options": "nosniff",
+            "Access-Control-Allow-Origin": "*",
+        },
     )

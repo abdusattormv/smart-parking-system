@@ -4,6 +4,8 @@ model:
 
 stage1:
   detector_path: runs/stage1_det/yolov8s_stage1/weights/best.pt
+  min_box_area: 1500
+  filter_mode: bounds
 
 input:
   frame_interval_ms: 500

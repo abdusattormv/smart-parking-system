@@ -37,7 +37,7 @@ DEFAULT_BACKEND_RETRY_DELAY_S = 10.0
 DEFAULT_SMOOTH_N = 5
 DEFAULT_FRAME_INTERVAL_MS = 500
 DEFAULT_POST_INTERVAL_S = 2.0
-DEFAULT_LOG_DIR = Path("logs/images")
+DEFAULT_LOG_DIR = Path("logs")
 DEFAULT_LATEST_FRAME_PATH = DEFAULT_LOG_DIR / "latest_frame.jpg"
 DEFAULT_LOG_FORMAT = "json"
 DEFAULT_STREAM_JPEG_QUALITY = 55
@@ -46,6 +46,13 @@ DEFAULT_STAGE2_THRESHOLD = 0.5
 DEFAULT_CONFIG_PATH = Path(__file__).parent / "config.yaml"
 DEFAULT_CAMERA_PROBE_LIMIT = 10
 DEFAULT_STAGE2_LOCAL_CHECKPOINT = "runs/stage2_cls/yolov8n_stage2/weights/best.pt"
+DEFAULT_STAGE1_MIN_BOX_AREA = 1500
+DEFAULT_STAGE1_FILTER_MODE = "bounds"
+DEFAULT_CAMERA_READ_RETRY_LIMIT = 30        # was 10 — give ~6s before giving up
+DEFAULT_CAMERA_REOPEN_LIMIT = 5             # was 3 — more reopen attempts before fallback
+DEFAULT_BUILTIN_CAMERA_LABEL = "built-in"
+DEFAULT_IPHONE_CAMERA_LABEL = "iphone"
+DEFAULT_CAMERA_PROBE_MISS_STREAK_LIMIT = 2
 
 DEFAULT_ROIS: Dict[str, Tuple[int, int, int, int]] = {
     "spot_1": (50, 100, 200, 250),
@@ -198,6 +205,30 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="SAHI slice overlap ratio (default: 0.2).",
     )
+    parser.add_argument(
+        "--stage1-min-box-area",
+        type=int,
+        default=None,
+        help="Minimum Stage 1 detection box area in pixels squared.",
+    )
+    parser.add_argument(
+        "--stage1-filter-mode",
+        choices=["none", "bounds", "roi_center"],
+        default=None,
+        help="Stage 1 spatial filtering mode: none, lot bounds, or ROI-center gating.",
+    )
+    parser.add_argument(
+        "--camera-read-retry-limit",
+        type=int,
+        default=DEFAULT_CAMERA_READ_RETRY_LIMIT,
+        help="How many consecutive camera read failures to tolerate before stopping.",
+    )
+    parser.add_argument(
+        "--camera-reopen-limit",
+        type=int,
+        default=DEFAULT_CAMERA_REOPEN_LIMIT,
+        help="How many times camera mode may reopen the capture session after repeated read failures.",
+    )
     return parser.parse_args()
 
 
@@ -254,6 +285,10 @@ def resolve_settings(args: argparse.Namespace, cfg: dict) -> argparse.Namespace:
         args.stage1_imgsz = stage1_cfg.get("imgsz", 1280)
     if args.stage1_sahi:
         args.stage1_sahi = stage1_cfg.get("use_sahi", True)
+    if args.stage1_min_box_area is None:
+        args.stage1_min_box_area = stage1_cfg.get("min_box_area", DEFAULT_STAGE1_MIN_BOX_AREA)
+    if args.stage1_filter_mode is None:
+        args.stage1_filter_mode = stage1_cfg.get("filter_mode", DEFAULT_STAGE1_FILTER_MODE)
 
     configured_stage2_path = Path(str(args.stage2_model))
     if not configured_stage2_path.exists():
@@ -386,6 +421,8 @@ def get_spot_boxes(
     stage1_imgsz: int = 1280,
     slice_size: int = 640,
     overlap: float = 0.2,
+    min_box_area: int = DEFAULT_STAGE1_MIN_BOX_AREA,
+    filter_mode: str = DEFAULT_STAGE1_FILTER_MODE,
 ) -> Dict[str, Tuple[int, int, int, int]]:
     if not use_stage1_detector:
         return fixed_rois
@@ -394,6 +431,7 @@ def get_spot_boxes(
 
     # Stage 1 is always a YOLO .pt — Core ML only applies to stage 2
     yolo_device = device if device != "coreml" else "cpu"
+    lot_mask = roi_bounds(fixed_rois)
 
     if use_sahi:
         try:
@@ -404,7 +442,7 @@ def get_spot_boxes(
             sahi_model = AutoDetectionModel.from_pretrained(
                 model_type="ultralytics",
                 model_path=stage1_model.ckpt_path,
-                confidence_threshold=0.1,
+                confidence_threshold=0.3,
                 device=yolo_device,
             )
             with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
@@ -452,6 +490,64 @@ def clip_box(
     if x2 <= x1 or y2 <= y1:
         return None
     return x1, y1, x2, y2
+
+
+def roi_bounds(rois: Dict[str, Tuple[int, int, int, int]]) -> Optional[Tuple[int, int, int, int]]:
+    if not rois:
+        return None
+    return (
+        min(box[0] for box in rois.values()),
+        min(box[1] for box in rois.values()),
+        max(box[2] for box in rois.values()),
+        max(box[3] for box in rois.values()),
+    )
+
+
+def box_area(box: Tuple[int, int, int, int]) -> int:
+    x1, y1, x2, y2 = box
+    return max(0, x2 - x1) * max(0, y2 - y1)
+
+
+def filter_stage1_box(
+    frame_shape: Tuple[int, int, int],
+    box: Tuple[int, int, int, int],
+    *,
+    lot_mask: Optional[Tuple[int, int, int, int]],
+    roi_boxes: Optional[Iterable[Tuple[int, int, int, int]]] = None,
+    min_box_area: int,
+    filter_mode: str = DEFAULT_STAGE1_FILTER_MODE,
+) -> Optional[Tuple[int, int, int, int]]:
+    clipped = clip_box(frame_shape, box)
+    if clipped is None:
+        return None
+    if box_area(clipped) < max(0, int(min_box_area)):
+        return None
+    if filter_mode == "none":
+        return clipped
+    if lot_mask is not None:
+        lot = clip_box(frame_shape, lot_mask)
+        if lot is None:
+            return None
+        lot_x1, lot_y1, lot_x2, lot_y2 = lot
+        x1, y1, x2, y2 = clipped
+        if x1 < lot_x1 or y1 < lot_y1 or x2 > lot_x2 or y2 > lot_y2:
+            return None
+    if filter_mode == "roi_center" and roi_boxes:
+        x1, y1, x2, y2 = clipped
+        cx = (x1 + x2) // 2
+        cy = (y1 + y2) // 2
+        center_in_roi = False
+        for roi in roi_boxes:
+            clipped_roi = clip_box(frame_shape, roi)
+            if clipped_roi is None:
+                continue
+            rx1, ry1, rx2, ry2 = clipped_roi
+            if rx1 <= cx < rx2 and ry1 <= cy < ry2:
+                center_in_roi = True
+                break
+        if not center_in_roi:
+            return None
+    return clipped
 
 
 def crop_patch(
@@ -599,6 +695,7 @@ def run_pipeline(
     stage2_model: Union[YOLO, Any],
     smooth_buf: SmoothingBuffer,
     args: argparse.Namespace,
+    last_confidences: Optional[Dict[str, float]] = None,  # ← add this
 ) -> Tuple[Dict[str, Any], Dict[str, Tuple[int, int, int, int]]]:
     spot_boxes = get_spot_boxes(
         frame=frame,
@@ -610,6 +707,8 @@ def run_pipeline(
         stage1_imgsz=args.stage1_imgsz,
         slice_size=args.stage1_slice_size,
         overlap=args.stage1_overlap,
+        min_box_area=args.stage1_min_box_area,
+        filter_mode=args.stage1_filter_mode,
     )
 
     raw_statuses: Dict[str, str] = {}
@@ -626,6 +725,12 @@ def run_pipeline(
         confidences[spot_id] = confidence
 
     smooth_buf.update(raw_statuses)
+    if last_confidences is not None:
+        merged = {**last_confidences, **confidences}
+        last_confidences.clear()
+        last_confidences.update(merged)
+        confidences = merged
+
     payload = build_payload(smooth_buf.get_status(), confidences)
     return payload, spot_boxes
 
@@ -683,15 +788,23 @@ def _probe_camera_index(index: int, backend: Optional[int] = None) -> bool:
         capture.release()
 
 
-def resolve_camera_source(source: str, probe_limit: int = DEFAULT_CAMERA_PROBE_LIMIT) -> int:
-    value = str(source).strip()
-    if value.isdigit():
-        return int(value)
-    if value.lower() != "iphone":
-        raise ValueError("Invalid --camera value. Use a numeric index like '0' or 'iphone'.")
-    if platform.system() != "Darwin":
-        raise ValueError("The iPhone camera option is supported only on macOS.")
+def open_camera_capture(index: int, backend: Optional[int] = None):
+    if backend in (None, 0):
+        return cv2.VideoCapture(index)
+    return cv2.VideoCapture(index, backend)
 
+
+def reopen_camera_capture(index: int, backend: Optional[int], current_capture) -> Any:
+    try:
+        current_capture.release()
+    except Exception:
+        pass
+    return open_camera_capture(index, backend)
+
+
+def _resolve_macos_iphone_camera(
+    probe_limit: int = DEFAULT_CAMERA_PROBE_LIMIT,
+) -> Tuple[int, Optional[int]]:
     result = subprocess.run(
         ["system_profiler", "SPCameraDataType", "-json"],
         capture_output=True,
@@ -705,10 +818,66 @@ def resolve_camera_source(source: str, probe_limit: int = DEFAULT_CAMERA_PROBE_L
         )
 
     backend = _macos_camera_backend()
+    candidates: list[int] = []
+    miss_streak = 0
     for index in range(max(1, int(probe_limit))):
         if _probe_camera_index(index, backend):
-            return index
-    raise RuntimeError("Detected an iPhone camera but could not open any AVFoundation camera index.")
+            candidates.append(index)
+            miss_streak = 0
+            continue
+        if candidates:
+            miss_streak += 1
+            if miss_streak >= DEFAULT_CAMERA_PROBE_MISS_STREAK_LIMIT:
+                break
+    if not candidates:
+        raise RuntimeError(
+            "Detected an iPhone camera but could not open any AVFoundation camera index."
+        )
+
+    # Continuity Camera commonly appears after the built-in webcam in AVFoundation.
+    # Prefer the highest working index instead of the first openable camera.
+    iphone_index = candidates[-1]
+    builtin_index = candidates[0] if candidates[0] != iphone_index else None
+    return iphone_index, builtin_index
+
+
+def resolve_camera_source(source: str, probe_limit: int = DEFAULT_CAMERA_PROBE_LIMIT) -> int:
+    value = str(source).strip()
+    if value.isdigit():
+        return int(value)
+    if value.lower() != "iphone":
+        raise ValueError("Invalid --camera value. Use a numeric index like '0' or 'iphone'.")
+    if platform.system() != "Darwin":
+        raise ValueError("The iPhone camera option is supported only on macOS.")
+    iphone_index, _builtin_index = _resolve_macos_iphone_camera(probe_limit)
+    return iphone_index
+
+
+def resolve_camera_runtime(source: str) -> Tuple[int, Optional[int], Optional[int], Optional[int], str]:
+    value = str(source).strip()
+    if value.isdigit():
+        return int(value), None, None, None, value
+    if value.lower() != DEFAULT_IPHONE_CAMERA_LABEL:
+        raise ValueError("Invalid --camera value. Use a numeric index like '0' or 'iphone'.")
+    if platform.system() != "Darwin":
+        raise ValueError("The iPhone camera option is supported only on macOS.")
+
+    iphone_index, builtin_index = _resolve_macos_iphone_camera()
+    backend = _macos_camera_backend()
+    fallback_backend = backend if builtin_index is not None else None
+    return iphone_index, backend, builtin_index, fallback_backend, DEFAULT_IPHONE_CAMERA_LABEL
+
+
+def handoff_to_builtin_camera(index: Optional[int], backend: Optional[int]) -> None:
+    if index is None:
+        return
+    capture = open_camera_capture(index, backend)
+    capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+    try:
+        if capture.isOpened():
+            capture.read()
+    finally:
+        capture.release()
 
 
 def run_inference(args: argparse.Namespace, fixed_rois: Dict[str, Tuple[int, int, int, int]]) -> int:
@@ -740,25 +909,44 @@ def run_inference(args: argparse.Namespace, fixed_rois: Dict[str, Tuple[int, int
     return 0
 
 
+import threading
+import queue
+
 def run_camera(args: argparse.Namespace, fixed_rois: Dict[str, Tuple[int, int, int, int]]) -> int:
     stage1_model, stage2_model = create_models(args)
     smooth_buf = SmoothingBuffer(window=args.smooth_n)
-    cap = cv2.VideoCapture(args.camera)
+    latest_frame_path = Path(args.latest_frame_path)
+
+    # Must open on the main thread for AVFoundation / Continuity Camera
+    cap = open_camera_capture(args.camera, getattr(args, "camera_backend", None))
     if not cap.isOpened():
         raise RuntimeError(f"Cannot open camera index {args.camera}")
 
-    latest_frame_path = Path(args.latest_frame_path)
     last_post = time.perf_counter() - args.post_interval
     backend_retry_after = 0.0
+    last_confidences: Dict[str, float] = {}
+    consecutive_failures = 0
+
     try:
         while True:
-            ok, frame = cap.read()
+            # Grab without decoding to flush stale buffered frames
+            for _ in range(2):
+                cap.grab()
+
+            ok, frame = cap.retrieve()
             if not ok:
-                print("Camera read failed; stopping.")
-                break
+                consecutive_failures += 1
+                if consecutive_failures >= args.camera_read_retry_limit:
+                    print("Too many consecutive failures, stopping.")
+                    break
+                time.sleep(0.05)
+                continue
+            consecutive_failures = 0
 
             started_at = time.perf_counter()
-            payload, spot_boxes = run_pipeline(frame, fixed_rois, stage1_model, stage2_model, smooth_buf, args)
+            payload, spot_boxes = run_pipeline(
+                frame, fixed_rois, stage1_model, stage2_model, smooth_buf, args, last_confidences
+            )
             annotated = annotate_frame(frame, payload["spots"], spot_boxes, payload["confidence"])
             write_latest_frame(
                 annotated,
@@ -767,31 +955,34 @@ def run_camera(args: argparse.Namespace, fixed_rois: Dict[str, Tuple[int, int, i
                 max_width=args.stream_max_width,
             )
 
-            if time.perf_counter() - last_post >= args.post_interval:
-                cv2.imwrite(f"logs/annotated_{payload['timestamp'].replace(':', '-')}.jpg", annotated)
-
+            now = time.perf_counter()
+            if now - last_post >= args.post_interval:
                 print(json.dumps(payload))
                 log_result(payload, Path(args.log_dir), args.log_format)
-                if args.post:
-                    now = time.perf_counter()
-                    if now >= backend_retry_after:
-                        try:
-                            post_payload(payload, args.backend_url, args.backend_timeout)
-                            backend_retry_after = 0.0
-                        except requests.RequestException as exc:
-                            backend_retry_after = now + max(0.0, args.backend_retry_delay)
-                            print(f"Backend POST failed: {exc}")
-                last_post = time.perf_counter()
+                if args.post and now >= backend_retry_after:
+                    try:
+                        post_payload(payload, args.backend_url, args.backend_timeout)
+                        backend_retry_after = 0.0
+                    except requests.RequestException as exc:
+                        backend_retry_after = now + args.backend_retry_delay
+                        print(f"Backend POST failed: {exc}")
+                last_post = now
 
-            sleep_seconds = max(0.0, args.frame_interval / 1000.0 - (time.perf_counter() - started_at))
-            if sleep_seconds:
-                time.sleep(sleep_seconds)
+            elapsed = time.perf_counter() - started_at
+            sleep_s = max(0.0, args.frame_interval / 1000.0 - elapsed)
+            if sleep_s:
+                time.sleep(sleep_s)
+
     except KeyboardInterrupt:
         print("\nStopped by user.")
     finally:
         cap.release()
+        if getattr(args, "requested_camera", None) == DEFAULT_IPHONE_CAMERA_LABEL:
+            handoff_to_builtin_camera(
+                getattr(args, "fallback_camera", None),
+                getattr(args, "fallback_camera_backend", None),
+            )
     return 0
-
 
 def main() -> None:
     args = parse_args()
@@ -800,7 +991,22 @@ def main() -> None:
     fixed_rois = normalize_rois(cfg.get("rois"))
 
     if args.camera is not None:
-        args.camera = resolve_camera_source(args.camera)
+        (
+            args.camera,
+            args.camera_backend,
+            args.fallback_camera,
+            args.fallback_camera_backend,
+            args.camera_source_label,
+        ) = resolve_camera_runtime(args.camera)
+        args.requested_camera = str(args.camera_source_label).strip().lower()
+        if args.camera_backend not in (None, 0):
+            print(f"Using camera index {args.camera} with AVFoundation backend.")
+        else:
+            print(f"Using camera index {args.camera}.")
+        if args.requested_camera == DEFAULT_IPHONE_CAMERA_LABEL and args.fallback_camera is not None:
+            print(
+                f"Built-in camera fallback is ready on index {args.fallback_camera}."
+            )
         raise SystemExit(run_camera(args, fixed_rois))
     raise SystemExit(run_inference(args, fixed_rois))
 

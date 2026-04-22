@@ -1,6 +1,6 @@
 model:
   stage2_path: artifacts/models/best.mlpackage
-  device: coreml
+  device: mps
 stage1:
   use_sahi: true
   slice_size: 640
