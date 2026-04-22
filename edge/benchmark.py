@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-"""FPS benchmark: compare MPS, CPU, ONNX FP32, and ONNX INT8.
+"""FPS benchmark: compare MPS, CPU, ONNX FP32, ONNX INT8, and Core ML.
 
 Usage:
     python edge/benchmark.py --task classify --image path/to/parking.jpg --model artifacts/models/best.pt
     python edge/benchmark.py --task detect --image path/to/parking.jpg --model runs/stage1_det/.../best.pt
 
 ONNX paths are inferred from the .pt path:
-    best.pt       → best.onnx      (FP32)
-    best.pt       → best_int8.onnx (INT8)
+    best.pt       → best.onnx        (FP32)
+    best.pt       → best_int8.onnx   (INT8)
+    best.pt       → best.mlpackage   (Core ML, Apple Silicon only)
 
 Skips any backend whose model file is not found.
 """
@@ -92,7 +93,11 @@ def prepare_runtime_frame(
     roi: Optional[Tuple[int, int, int, int]],
 ) -> np.ndarray:
     cropped = clip_roi(frame, roi)
-    interpolation = cv2.INTER_AREA if cropped.shape[0] >= imgsz and cropped.shape[1] >= imgsz else cv2.INTER_LINEAR
+    interpolation = (
+        cv2.INTER_AREA
+        if cropped.shape[0] >= imgsz and cropped.shape[1] >= imgsz
+        else cv2.INTER_LINEAR
+    )
     if task == "classify":
         return cv2.resize(cropped, (imgsz, imgsz), interpolation=interpolation)
     return cropped
@@ -106,7 +111,7 @@ def benchmark_yolo(
     warmup: int,
 ) -> Dict[str, Any]:
     """Benchmark ultralytics YOLO on a given device."""
-    from ultralytics import YOLO  # deferred import so benchmark.py stays standalone
+    from ultralytics import YOLO
 
     model = YOLO(model_path)
 
@@ -150,11 +155,9 @@ def benchmark_onnx(
     session = ort.InferenceSession(onnx_path, providers=["CPUExecutionProvider"])
     input_name = session.get_inputs()[0].name
 
-    # Preprocess: resize → normalize → NCHW float32
-    edge = imgsz if task == "classify" else imgsz
-    resized = cv2.resize(frame, (edge, edge))
+    resized = cv2.resize(frame, (imgsz, imgsz))
     tensor = resized[:, :, ::-1].astype(np.float32) / 255.0  # BGR→RGB, /255
-    tensor = np.transpose(tensor, (2, 0, 1))[np.newaxis]  # HWC → 1CHW
+    tensor = np.transpose(tensor, (2, 0, 1))[np.newaxis]      # HWC → 1CHW
 
     for _ in range(warmup):
         session.run(None, {input_name: tensor})
@@ -171,6 +174,57 @@ def benchmark_onnx(
         "fps": round(1 / avg_latency, 1),
         "latency_ms": round(avg_latency * 1000, 1),
         "model_size_mb": round(Path(onnx_path).stat().st_size / 1e6, 1),
+    }
+
+
+def benchmark_coreml(
+    mlpackage_path: Path,
+    frame: np.ndarray,
+    *,
+    imgsz: int,
+    iterations: int,
+    warmup: int,
+) -> Optional[Dict[str, Any]]:
+    """Benchmark Core ML on Apple Silicon (ANE/GPU). Returns None if unavailable."""
+    if not mlpackage_path.exists():
+        return None
+
+    try:
+        import coremltools as ct
+        import PIL.Image
+    except ImportError:
+        print("  coremltools or Pillow not installed — skipping Core ML")
+        return None
+
+    model = ct.models.MLModel(str(mlpackage_path))
+
+    # Prepare input as PIL RGB image resized to imgsz
+    resized = cv2.resize(frame, (imgsz, imgsz))
+    pil_img = PIL.Image.fromarray(cv2.cvtColor(resized, cv2.COLOR_BGR2RGB))
+
+    # Discover the image input name from the model spec
+    spec = model.get_spec()
+    input_name = spec.description.input[0].name
+
+    for _ in range(warmup):
+        model.predict({input_name: pil_img})
+
+    times = []
+    for _ in range(iterations):
+        t0 = time.perf_counter()
+        model.predict({input_name: pil_img})
+        times.append(time.perf_counter() - t0)
+
+    avg_latency = sum(times) / len(times)
+    size_mb = sum(
+        f.stat().st_size for f in mlpackage_path.rglob("*") if f.is_file()
+    ) / 1e6
+
+    return {
+        "backend": "CoreML-int8",
+        "fps": round(1 / avg_latency, 1),
+        "latency_ms": round(avg_latency * 1000, 1),
+        "model_size_mb": round(size_mb, 1),
     }
 
 
@@ -194,7 +248,10 @@ def print_results_table(results: List[Dict[str, Any]]) -> None:
 def save_results(results: List[Dict[str, Any]], json_path: Path, csv_path: Path) -> None:
     json_path.parent.mkdir(parents=True, exist_ok=True)
     csv_path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {"generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "results": results}
+    payload = {
+        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "results": results,
+    }
     json_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
     if results:
@@ -224,12 +281,14 @@ def main() -> None:
 
     onnx_fp32_path = model_path.with_suffix(".onnx")
     onnx_int8_path = model_path.with_name(model_path.stem + "_int8.onnx")
+    coreml_path = model_path.with_suffix(".mlpackage")
 
     results: List[Dict[str, Any]] = []
+
+    # --- PyTorch backends (MPS + CPU) ---
     available_devices = ["cpu"]
     try:
         import torch
-
         if torch.backends.mps.is_available():
             available_devices.insert(0, "mps")
     except Exception:
@@ -245,6 +304,7 @@ def main() -> None:
         except Exception as exc:
             print(f"  Skipped YOLO-{device}: {exc}")
 
+    # --- ONNX backends ---
     for label, path in [("ONNX-fp32", onnx_fp32_path), ("ONNX-int8", onnx_int8_path)]:
         print(f"Benchmarking {label} ({args.iterations} iters, {args.warmup} warmup)...")
         try:
@@ -263,6 +323,23 @@ def main() -> None:
                 print(f"  Skipped {label}: {path} not found")
         except Exception as exc:
             print(f"  Skipped {label}: {exc}")
+
+    # --- Core ML backend (Apple Silicon only) ---
+    print(f"Benchmarking CoreML-int8 ({args.iterations} iters, {args.warmup} warmup)...")
+    try:
+        r = benchmark_coreml(
+            coreml_path,
+            runtime_frame,
+            imgsz=args.imgsz,
+            iterations=args.iterations,
+            warmup=args.warmup,
+        )
+        if r is not None:
+            results.append(r)
+        else:
+            print(f"  Skipped CoreML-int8: {coreml_path} not found")
+    except Exception as exc:
+        print(f"  Skipped CoreML-int8: {exc}")
 
     print_results_table(results)
     save_results(results, Path(args.output_json), Path(args.output_csv))

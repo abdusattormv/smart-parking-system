@@ -18,3 +18,8 @@ lxml>=5.1,<6.0
 # Optional local inference/export support
 onnx>=1.16,<2.0
 onnxruntime>=1.17,<2.0
+onnxslim>=0.1.71
+
+# Apple Silicon export + benchmark
+coremltools>=8.0,<9.0
+Pillow>=10.0,<12.0

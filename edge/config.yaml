@@ -1,6 +1,6 @@
 model:
-  stage2_path: runs/stage2_cls/yolov8s_stage2/weights/best.pt
-  device: mps
+  stage2_path: artifacts/models/best.mlpackage
+  device: coreml
 stage1:
   use_sahi: true
   slice_size: 640

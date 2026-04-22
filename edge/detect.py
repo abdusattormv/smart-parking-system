@@ -20,7 +20,7 @@ import time
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, Optional, Tuple
+from typing import Any, Dict, Iterable, Optional, Tuple, Union
 
 import cv2
 import numpy as np
@@ -123,16 +123,16 @@ def parse_args() -> argparse.Namespace:
         help="Occupied confidence threshold used by the edge classifier.",
     )
     parser.add_argument(
-    "--stage1-imgsz",
-    type=int,
-    default=None,
-    help="Inference image size for stage1 detector (default: 1280).",
+        "--stage1-imgsz",
+        type=int,
+        default=None,
+        help="Inference image size for stage1 detector (default: 1280).",
     )
     parser.add_argument(
-    "--stage1-sahi",
-    action="store_true",
-    default=True,  # ← on by default
-    help="Use SAHI sliced inference for stage1 (default: enabled).",
+        "--stage1-sahi",
+        action="store_true",
+        default=True,
+        help="Use SAHI sliced inference for stage1 (default: enabled).",
     )
     parser.add_argument(
         "--no-stage1-sahi",
@@ -188,9 +188,9 @@ def resolve_settings(args: argparse.Namespace, cfg: dict) -> argparse.Namespace:
         args.stage1_overlap = stage1_cfg.get("overlap", 0.2)
     if args.stage1_imgsz is None:
         args.stage1_imgsz = stage1_cfg.get("imgsz", 1280)
-    # only override from config if user didn't explicitly pass --no-stage1-sahi
     if args.stage1_sahi:
         args.stage1_sahi = stage1_cfg.get("use_sahi", True)
+
     configured_stage2_path = Path(str(args.stage2_model))
     if not configured_stage2_path.exists():
         local_stage2_checkpoint = Path(DEFAULT_STAGE2_LOCAL_CHECKPOINT)
@@ -247,6 +247,71 @@ class SmoothingBuffer:
             history.clear()
 
 
+# ---------------------------------------------------------------------------
+# Core ML helpers
+# ---------------------------------------------------------------------------
+
+def _is_coreml(model_path: str) -> bool:
+    return str(model_path).endswith(".mlpackage") or str(model_path).endswith(".mlmodel")
+
+
+def _load_coreml(model_path: str) -> Any:
+    try:
+        import coremltools as ct
+    except ImportError:
+        raise ImportError(
+            "coremltools is required for Core ML inference. "
+            "Install it with: pip install coremltools"
+        )
+    return ct.models.MLModel(model_path)
+
+
+def _classify_coreml(
+    model: Any,
+    patch: np.ndarray,
+    imgsz: int,
+    threshold: float,
+    class_names: Dict[int, str],
+) -> Tuple[str, float]:
+    """Run a single patch through a Core ML classifier. Returns (status, confidence)."""
+    import PIL.Image
+
+    resized = cv2.resize(patch, (imgsz, imgsz))
+    pil_img = PIL.Image.fromarray(cv2.cvtColor(resized, cv2.COLOR_BGR2RGB))
+
+    # Cache input name on the model object to avoid repeated spec parsing
+    if not hasattr(model, "_cached_input_name"):
+        model._cached_input_name = model.get_spec().description.input[0].name
+    output = model.predict({model._cached_input_name: pil_img})
+
+    # Output shape: classLabel (str), classLabel_probs (dict), var_NNN (ndarray)
+    # Use classLabel_probs when available; fall back to any dict in output.
+    probs: Dict[str, float] = {}
+    if "classLabel_probs" in output and isinstance(output["classLabel_probs"], dict):
+        probs = output["classLabel_probs"]
+    else:
+        for v in output.values():
+            if isinstance(v, dict):
+                probs = v
+                break
+
+    if probs:
+        label = max(probs, key=lambda k: probs[k])
+        confidence = float(probs[label])
+    elif "classLabel" in output:
+        label = str(output["classLabel"])
+        confidence = 1.0
+    else:
+        return "free", 0.0
+
+    status = "occupied" if label == "occupied" and confidence >= threshold else "free"
+    return status, confidence
+
+
+# ---------------------------------------------------------------------------
+# Stage 1 / Stage 2 model loading & inference
+# ---------------------------------------------------------------------------
+
 def get_spot_boxes(
     frame: np.ndarray,
     fixed_rois: Dict[str, Tuple[int, int, int, int]],
@@ -256,12 +321,15 @@ def get_spot_boxes(
     use_sahi: bool = False,
     stage1_imgsz: int = 1280,
     slice_size: int = 640,
-    overlap: float = 0.2,           
+    overlap: float = 0.2,
 ) -> Dict[str, Tuple[int, int, int, int]]:
     if not use_stage1_detector:
         return fixed_rois
     if stage1_model is None:
         raise ValueError("Stage 1 detector requested but no model was loaded.")
+
+    # Stage 1 is always a YOLO .pt — Core ML only applies to stage 2
+    yolo_device = device if device != "coreml" else "cpu"
 
     if use_sahi:
         try:
@@ -273,9 +341,8 @@ def get_spot_boxes(
                 model_type="ultralytics",
                 model_path=stage1_model.ckpt_path,
                 confidence_threshold=0.1,
-                device=device,
+                device=yolo_device,
             )
-            # SAHI needs a file path, write frame to temp file
             with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
                 tmp_path = tmp.name
             cv2.imwrite(tmp_path, frame)
@@ -299,7 +366,7 @@ def get_spot_boxes(
         except ImportError:
             print("SAHI not installed; falling back to standard inference.")
 
-    results = stage1_model(frame, device=device, verbose=False, imgsz=stage1_imgsz)[0]
+    results = stage1_model(frame, device=yolo_device, verbose=False, imgsz=stage1_imgsz)[0]
     boxes = {}
     for index, box in enumerate(results.boxes.xyxy.cpu().numpy(), start=1):
         x1, y1, x2, y2 = box.astype(int)
@@ -347,13 +414,19 @@ def _result_label_confidence(result: Any) -> Tuple[str, float]:
 def classify_patch(
     frame: np.ndarray,
     box: Tuple[int, int, int, int],
-    model: YOLO,
+    model: Union[YOLO, Any],
     device: str,
     threshold: float,
 ) -> Tuple[str, float]:
     patch = crop_patch(frame, box)
     if patch is None:
         return "free", 0.0
+
+    # Core ML path — model is a ct.models.MLModel, not a YOLO instance
+    if device == "coreml":
+        return _classify_coreml(model, patch, imgsz=64, threshold=threshold, class_names={})
+
+    # PyTorch / ONNX path via ultralytics
     resized = cv2.resize(patch, (64, 64))
     result = model(resized, device=device, verbose=False)[0]
     label, confidence = _result_label_confidence(result)
@@ -393,10 +466,9 @@ def annotate_frame(
         font_scale = 0.38
         thickness = 1
         (tw, th), baseline = cv2.getTextSize(label, font, font_scale, thickness)
-        tx, ty = x1, y1 -6
+        tx, ty = x1, y1 - 6
         cv2.rectangle(annotated, (tx - 1, ty - th - 1), (tx + tw + 1, ty + baseline), color, -1)
         cv2.putText(annotated, label, (tx, ty), font, font_scale, text_color, thickness, cv2.LINE_AA)
-
     return annotated
 
 
@@ -427,7 +499,7 @@ def run_pipeline(
     frame: np.ndarray,
     fixed_rois: Dict[str, Tuple[int, int, int, int]],
     stage1_model: Optional[YOLO],
-    stage2_model: YOLO,
+    stage2_model: Union[YOLO, Any],
     smooth_buf: SmoothingBuffer,
     args: argparse.Namespace,
 ) -> Tuple[Dict[str, Any], Dict[str, Tuple[int, int, int, int]]]:
@@ -461,9 +533,17 @@ def run_pipeline(
     return payload, spot_boxes
 
 
-def create_models(args: argparse.Namespace) -> Tuple[Optional[YOLO], YOLO]:
+def create_models(args: argparse.Namespace) -> Tuple[Optional[YOLO], Union[YOLO, Any]]:
     stage1_model = YOLO(args.stage1_model) if args.stage1_detector else None
-    stage2_model = YOLO(args.stage2_model)
+
+    # Stage 2: load via coremltools if .mlpackage, otherwise ultralytics YOLO
+    if _is_coreml(args.stage2_model):
+        stage2_model = _load_coreml(args.stage2_model)
+        # Force device to coreml so classify_patch takes the right branch
+        args.device = "coreml"
+    else:
+        stage2_model = YOLO(args.stage2_model)
+
     return stage1_model, stage2_model
 
 

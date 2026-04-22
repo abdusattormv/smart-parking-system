@@ -66,6 +66,15 @@ def main() -> None:
         print(f"FP32 ONNX → {dst_onnx} ({size_mb:.1f} MB)")
     else:
         print(f"Warning: FP32 ONNX not found at expected path {fp32_src}")
+        
+    print("Exporting Core ML ...")
+    coreml_result = model.export(format="coreml", imgsz=args.imgsz, int8=True)
+    coreml_src = Path(str(coreml_result))
+    if coreml_src.exists():
+        dst_coreml = out_dir / "best.mlpackage"
+        shutil.copytree(coreml_src, dst_coreml, dirs_exist_ok=True)
+        size_mb = sum(f.stat().st_size for f in dst_coreml.rglob("*") if f.is_file()) / 1_048_576
+        print(f"Core ML INT8 → {dst_coreml} ({size_mb:.1f} MB)")
 
     # INT8 ONNX
     if dst_onnx is not None and dst_onnx.exists():
