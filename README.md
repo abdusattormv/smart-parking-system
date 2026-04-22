@@ -21,6 +21,28 @@ The final-project default is now:
 - `backend/` stores payloads from the edge pipeline and returns latest/history views
 - `docs/` contains the canonical PRD and aligned milestone notes
 
+## Public Release Policy
+
+This repo is intended to stay public-safe:
+
+- code, configs, metrics, and reproducible commands stay in the repo
+- trained weights do not get committed into git history
+- dataset archives, extracted datasets, runtime databases, and generated logs stay out of git
+
+Academic-use guidance:
+
+- this repo is shared publicly for academic review and demonstration
+- no claim is made that all upstream datasets permit public redistribution of derived checkpoints
+- before publishing model weights, verify that the exact training data license allows redistribution of trained artifacts
+
+Model publishing guidance is in [MODEL_LICENSE.md](/Users/thebkht/Projects/smart-parking-system/MODEL_LICENSE.md).
+
+Recommended release pattern:
+
+- publish final weights as GitHub Release assets or an external model registry
+- document the exact datasets used to train each released checkpoint
+- do not redistribute checkpoints trained on datasets whose licenses do not clearly allow model redistribution
+
 ## Canonical Artifacts
 
 - Stage 2 dataset: `stage2_data/`
@@ -159,7 +181,7 @@ uvicorn backend.main:app --reload
 Open the live MJPEG stream in a browser:
 
 ```html
-<img src="http://127.0.0.1:8000/stream" alt="Parking stream">
+<img src="http://127.0.0.1:8000/stream" alt="Parking stream" />
 ```
 
 Run image inference with fixed ROIs:

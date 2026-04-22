@@ -25,6 +25,8 @@ logs/
 *.onnx
 *.csv
 *.jsonl
+downloads/
+*.db
 
 # macOS
 .DS_Store
