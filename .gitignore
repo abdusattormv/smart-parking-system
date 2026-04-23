@@ -21,6 +21,7 @@ dist/
 runs/
 artifacts/
 logs/
+log/
 *.pt
 *.onnx
 *.csv

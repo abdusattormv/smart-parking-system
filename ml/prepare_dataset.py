@@ -17,6 +17,7 @@ import json
 import math
 import re
 import shutil
+import xml.etree.ElementTree as ET
 from collections import Counter, defaultdict
 from pathlib import Path
 from statistics import median
@@ -60,6 +61,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--pklot-dir", required=True)
     parser.add_argument("--cnrpark-dir", default=None)
+    parser.add_argument(
+        "--parking-space-dir",
+        default=None,
+        help="Optional Parking Space Detection Dataset root with annotations.xml and images/ for Stage 1 augmentation.",
+    )
     parser.add_argument("--stage1", action="store_true", help="Prepare Stage 1 detection data.")
     parser.add_argument("--stage2", action="store_true", help="Prepare Stage 2 classification data.")
     parser.add_argument(
@@ -192,6 +198,25 @@ def iter_detection_boxes(label_path: Path) -> Iterable[tuple[int, tuple[float, f
 def format_detection_box(class_id: int, box: tuple[float, float, float, float]) -> str:
     cx, cy, bw, bh = box
     return f"{class_id} {cx:.6f} {cy:.6f} {bw:.6f} {bh:.6f}"
+
+
+def _pixel_polygon_to_unit_box(
+    points: str,
+    *,
+    width: int,
+    height: int,
+) -> tuple[float, float, float, float] | None:
+    coords: list[float] = []
+    for pair in points.split(";"):
+        pair = pair.strip()
+        if not pair:
+            continue
+        try:
+            x_raw, y_raw = pair.split(",", 1)
+            coords.extend((float(x_raw) / width, float(y_raw) / height))
+        except ValueError:
+            return None
+    return _label_geometry_to_box(coords)
 
 
 def validate_split_ratios(val_ratio: float, test_ratio: float) -> None:
@@ -408,6 +433,92 @@ def _discover_detection_records(
     }
 
 
+def _discover_parking_space_detection_records(root: Path) -> tuple[list[dict[str, object]], dict[str, object]]:
+    annotations_path = root / "annotations.xml"
+    images_dir = root / "images"
+    if not annotations_path.exists():
+        raise SystemExit(f"Parking Space Detection Dataset annotations.xml not found in {root}")
+    if not images_dir.exists():
+        raise SystemExit(f"Parking Space Detection Dataset images/ not found in {root}")
+
+    tree = ET.parse(annotations_path)
+    records: list[dict[str, object]] = []
+    empty_excluded = 0
+    polygon_labels = 0
+    tiny_boxes = 0
+    class_counts: Counter[str] = Counter()
+    scene_rule_counts: Counter[str] = Counter()
+
+    for image_node in tree.getroot().findall("image"):
+        image_rel = image_node.attrib.get("name", "")
+        image_path = root / image_rel
+        if not image_path.exists():
+            continue
+
+        width = int(image_node.attrib["width"])
+        height = int(image_node.attrib["height"])
+        lines: list[str] = []
+        seen_boxes: set[tuple[float, float, float, float]] = set()
+
+        for polygon in image_node.findall("polygon"):
+            label = polygon.attrib.get("label", "").strip()
+            if label not in {
+                "free_parking_space",
+                "not_free_parking_space",
+                "partially_free_parking_space",
+            }:
+                continue
+            box = _pixel_polygon_to_unit_box(
+                polygon.attrib.get("points", ""),
+                width=width,
+                height=height,
+            )
+            if box is None:
+                continue
+            if box[2] * box[3] < _TINY_BOX_AREA:
+                tiny_boxes += 1
+                continue
+            rounded_box = tuple(round(value, 6) for value in box)
+            if rounded_box in seen_boxes:
+                continue
+            seen_boxes.add(rounded_box)
+            lines.append(format_detection_box(0, box))
+            polygon_labels += 1
+            class_counts[label] += 1
+
+        if not lines:
+            empty_excluded += 1
+            continue
+
+        normalized_stem = f"parking_space_dataset__{image_path.stem}"
+        scene_id = normalized_stem
+        scene_rule = "parking_space_dataset_image"
+        scene_rule_counts[scene_rule] += 1
+        records.append(
+            {
+                "image_path": image_path,
+                "label_path": annotations_path,
+                "normalized_stem": normalized_stem,
+                "scene_id": scene_id,
+                "scene_rule": scene_rule,
+                "source_split": "external",
+                "label_lines": lines,
+                "box_count": len(lines),
+            }
+        )
+
+    records.sort(key=lambda item: str(item["image_path"]))
+    return records, {
+        "duplicates_removed": 0,
+        "empty_label_frames_excluded": empty_excluded,
+        "polygon_labels_converted": polygon_labels,
+        "duplicate_boxes_excluded": 0,
+        "tiny_boxes_excluded": tiny_boxes,
+        "scene_id_rules": dict(sorted(scene_rule_counts.items())),
+        "source_label_counts": dict(sorted(class_counts.items())),
+    }
+
+
 def assign_scene_splits(
     records: list[dict[str, object]],
     *,
@@ -604,6 +715,7 @@ def _prepare_detection_dataset(
     out_dir: Path,
     yaml_path: Path,
     *,
+    parking_space_dir: Path | None,
     stage1_mode: bool,
     val_ratio: float,
     test_ratio: float,
@@ -611,6 +723,12 @@ def _prepare_detection_dataset(
 ) -> dict[str, object]:
     validate_split_ratios(val_ratio, test_ratio)
     records, discovery = _discover_detection_records(pklot_dir, stage1_mode=stage1_mode)
+    source_summaries: dict[str, dict[str, object]] = {"pklot": discovery}
+    if stage1_mode and parking_space_dir is not None:
+        extra_records, extra_discovery = _discover_parking_space_detection_records(parking_space_dir)
+        records.extend(extra_records)
+        records.sort(key=lambda item: str(item["image_path"]))
+        source_summaries["parking_space_dataset"] = extra_discovery
     if not records:
         raise SystemExit(f"No labeled detection frames found in {pklot_dir}")
 
@@ -649,6 +767,7 @@ def _prepare_detection_dataset(
         "duplicates_removed": discovery["duplicates_removed"],
         "empty_label_frames_excluded": discovery["empty_label_frames_excluded"],
         "polygon_labels_converted": discovery["polygon_labels_converted"],
+        "sources": source_summaries,
         "audit": {
             "duplicate_boxes_excluded": discovery["duplicate_boxes_excluded"],
             "tiny_boxes_excluded": discovery["tiny_boxes_excluded"],
@@ -666,6 +785,7 @@ def prepare_stage1(
     out_dir: Path,
     yaml_path: Path,
     *,
+    parking_space_dir: Path | None = None,
     val_ratio: float = 0.15,
     test_ratio: float = 0.15,
     seed: int = 42,
@@ -675,6 +795,7 @@ def prepare_stage1(
         pklot_dir,
         out_dir,
         yaml_path,
+        parking_space_dir=parking_space_dir,
         stage1_mode=True,
         val_ratio=val_ratio,
         test_ratio=test_ratio,
@@ -699,6 +820,7 @@ def prepare_single_model_detection(
         pklot_dir,
         out_dir,
         yaml_path,
+        parking_space_dir=None,
         stage1_mode=False,
         val_ratio=val_ratio,
         test_ratio=test_ratio,
@@ -1017,12 +1139,16 @@ def main() -> None:
         raise SystemExit(f"PKLot directory not found: {pklot_dir}")
     if not _roboflow_splits(pklot_dir):
         raise SystemExit(f"No Roboflow train/valid/test splits found in {pklot_dir}")
+    parking_space_dir = Path(args.parking_space_dir) if args.parking_space_dir else None
+    if parking_space_dir is not None and not parking_space_dir.exists():
+        raise SystemExit(f"Parking Space Detection Dataset directory not found: {parking_space_dir}")
 
     if args.stage1:
         prepare_stage1(
             pklot_dir,
             Path(args.stage1_output),
             Path(args.stage1_yaml),
+            parking_space_dir=parking_space_dir,
             val_ratio=args.val_ratio,
             test_ratio=args.test_ratio,
             seed=args.seed,

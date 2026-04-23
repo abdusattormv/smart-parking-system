@@ -10,6 +10,9 @@ Each pair of clicks defines one ROI. Press:
 
 Usage:
   python3 pick_rois.py --image "samples/your_image.jpg"
+  python3 pick_rois.py --video "samples/your_video.mp4"
+  python3 pick_rois.py --video "samples/your_video.mp4" --frame-number 120
+  python3 pick_rois.py --video "samples/your_video.mp4" --time-sec 4.0
   python3 pick_rois.py --image "samples/your_image.jpg" --config edge/config.yaml
   python3 pick_rois.py --image "samples/your_image.jpg" --scale 0.7
 """
@@ -169,22 +172,69 @@ def save_config(state: PickerState, config_path: Path) -> None:
 # ── main ────────────────────────────────────────────────────────────────────
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Interactive ROI picker for smart-parking config.yaml")
-    p.add_argument("--image", required=True, help="Path to parking lot image")
+    source = p.add_mutually_exclusive_group(required=True)
+    source.add_argument("--image", help="Path to parking lot image")
+    source.add_argument("--video", help="Path to parking lot video")
     p.add_argument("--config", default="edge/config.yaml", help="Output config.yaml path")
     p.add_argument("--scale", type=float, default=1.0,
                    help="Display scale factor (e.g. 0.7 to shrink large images)")
+    p.add_argument(
+        "--frame-number",
+        type=int,
+        default=0,
+        help="Video frame number to load when using --video (default: 0).",
+    )
+    p.add_argument(
+        "--time-sec",
+        type=float,
+        default=None,
+        help="Video timestamp in seconds to load when using --video. Overrides --frame-number.",
+    )
     return p.parse_args()
+
+
+def load_source_frame(args: argparse.Namespace) -> tuple[np.ndarray, Path, str]:
+    if args.image:
+        source_path = Path(args.image)
+        if not source_path.exists():
+            sys.exit(f"Image not found: {source_path}")
+        frame = cv2.imread(str(source_path))
+        if frame is None:
+            sys.exit(f"OpenCV could not read: {source_path}")
+        return frame, source_path, "image"
+
+    video_path = Path(str(args.video))
+    if not video_path.exists():
+        sys.exit(f"Video not found: {video_path}")
+
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        sys.exit(f"OpenCV could not open video: {video_path}")
+
+    try:
+        if args.time_sec is not None:
+            if args.time_sec < 0:
+                sys.exit("--time-sec must be >= 0.")
+            cap.set(cv2.CAP_PROP_POS_MSEC, float(args.time_sec) * 1000.0)
+        else:
+            if args.frame_number < 0:
+                sys.exit("--frame-number must be >= 0.")
+            cap.set(cv2.CAP_PROP_POS_FRAMES, int(args.frame_number))
+
+        ok, frame = cap.read()
+        if not ok or frame is None:
+            selector = (
+                f"time {args.time_sec:.3f}s" if args.time_sec is not None else f"frame {args.frame_number}"
+            )
+            sys.exit(f"Could not read {selector} from video: {video_path}")
+        return frame, video_path, "video"
+    finally:
+        cap.release()
 
 
 def main() -> None:
     args = parse_args()
-    img_path = Path(args.image)
-    if not img_path.exists():
-        sys.exit(f"Image not found: {img_path}")
-
-    frame = cv2.imread(str(img_path))
-    if frame is None:
-        sys.exit(f"OpenCV could not read: {img_path}")
+    frame, source_path, source_kind = load_source_frame(args)
 
     scale = float(args.scale)
     if scale != 1.0:
@@ -211,7 +261,12 @@ def main() -> None:
 
     cv2.setMouseCallback(WIN, on_mouse)
 
-    print(f"\nOpened: {img_path}  ({frame.shape[1]}×{frame.shape[0]}px)")
+    print(f"\nOpened {source_kind}: {source_path}  ({frame.shape[1]}×{frame.shape[0]}px)")
+    if source_kind == "video":
+        if args.time_sec is not None:
+            print(f"Selected video timestamp: {args.time_sec:.3f}s")
+        else:
+            print(f"Selected video frame: {args.frame_number}")
     print("Click TOP-LEFT then BOTTOM-RIGHT of each parking spot.")
     print("Keys: U=undo  R=reset  S=save+quit  Q=quit\n")
 

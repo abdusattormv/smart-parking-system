@@ -6,9 +6,9 @@ This repo implements the v3 smart parking pipeline:
 
 The deployed demo still supports fixed ROIs for a static camera, but the recommended ML workflow is now:
 
-`full-frame slot detector -> per-slot crop -> occupancy classifier`
+`full-frame parking-space detector -> per-slot crop -> occupancy classifier`
 
-Stage 1 full-frame slot detection is the primary generalization track. Stage 2 patch classification remains the occupancy model. The single-model full-frame occupancy detector remains only as an ML comparison baseline.
+Stage 1 full-frame parking-space detection is the primary generalization track. Stage 2 patch classification remains the occupancy model. The single-model full-frame occupancy detector remains only as an ML comparison baseline.
 
 The final-project default is now:
 
@@ -78,13 +78,31 @@ pip install -r requirements-dev.txt
 
 Full-frame detection must be evaluated by scene holdout. Image-level random splits are not treated as evidence of generalization in this repo.
 
-Recommended Stage 1 full-frame slot detector:
+Recommended Stage 1 full-frame parking-space detector:
 
 ```bash
 python ml/prepare_dataset.py --stage1 --pklot-dir /path/to/pklot_roboflow
 python ml/train.py --stage1 --variant s --device mps
 python ml/train.py --stage1 --variant m --imgsz 960 --device mps
 python ml/evaluate.py --stage1 --weights runs/stage1_det/yolov8s_stage1/weights/best.pt --split val
+```
+
+Fine-tune an existing Stage 1 parking-space detector on a custom camera while keeping the repo's MPS patch path:
+
+```bash
+python ml/train.py --stage1 \
+  --data datasets/yolo_parking/dataset.yaml \
+  --weights runs/stage1_det/yolov8s_stage1/weights/best.pt \
+  --epochs 50 \
+  --imgsz 640 \
+  --freeze 10 \
+  --lr 0.001 \
+  --batch 8 \
+  --device mps \
+  --project runs/stage1_finetune \
+  --name my_camera \
+  --exist-ok \
+  --no-amp
 ```
 
 Single-model occupancy detector baseline:
@@ -195,8 +213,9 @@ python edge/detect.py \
 
 `detect.py` now posts to the backend by default, so `/status` and `/history` update automatically while the backend is running.
 Use `--no-post` for offline-only inference.
+For oblique camera views, configure `preprocess.perspective` in [edge/config.example.yaml](/Users/thebkht/Projects/smart-parking-system/edge/config.example.yaml) and redraw `rois` against the rectified output.
 
-Run the integrated final pipeline with the trained Stage 1 detector:
+Run the integrated final pipeline with the trained Stage 1 parking-space detector:
 
 ```bash
 python edge/detect.py \

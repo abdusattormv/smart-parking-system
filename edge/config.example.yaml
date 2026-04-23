@@ -3,6 +3,7 @@ model:
   device: mps
 
 stage1:
+  # Full-frame parking-space detector checkpoint.
   detector_path: runs/stage1_det/yolov8s_stage1/weights/best.pt
   min_box_area: 1500
   filter_mode: bounds
@@ -26,6 +27,19 @@ postprocess:
 logging:
   output_dir: logs
   format: json
+
+# Optional: rectify an oblique camera view before ROIs and classification.
+# source_points must be ordered consistently (for example: top-left, top-right,
+# bottom-right, bottom-left). If destination_points is omitted, output_size
+# produces a rectangular bird's-eye target.
+preprocess:
+  perspective:
+    source_points:
+      - [0, 0]
+      - [1279, 0]
+      - [1279, 719]
+      - [0, 719]
+    output_size: [1280, 720]
 
 rois:
   spot_1: [50, 100, 200, 250]

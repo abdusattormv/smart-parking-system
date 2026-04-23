@@ -2,9 +2,6 @@ model:
   stage2_path: artifacts/models/best.mlpackage
   device: mps
 stage1:
-  use_sahi: true
-  slice_size: 640
-  overlap: 0.3
   imgsz: 1280
   postprocess_type: NMM
   match_threshold: 0.3

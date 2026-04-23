@@ -6,7 +6,7 @@ The edge pipeline follows the v3 architecture:
 
 ## Default Behavior
 
-- fixed ROI boxes are the default Stage 1 path
+- fixed ROI boxes are the default static-camera localization path
 - Stage 2 classification is the required model path for normal use
 - backend POSTs are enabled by default, so backend `/status` and `/history` update automatically unless `--no-post` is used
 - smoothing stabilizes only the final occupied/free status
@@ -15,16 +15,17 @@ The edge pipeline follows the v3 architecture:
 - camera mode updates `logs/latest_frame.jpg` on every processed frame for backend MJPEG streaming
 - camera mode tolerates short read glitches before stopping, which helps Continuity Camera sessions recover
 
-## Optional Stage 1 Detector
+## Stage 1 Parking-Space Detection
 
-`edge/detect.py` supports a YOLO Stage 1 spot detector behind `--stage1-detector`, but that is secondary work. The main demo and main accuracy story should assume static camera placement plus configured ROIs.
+`edge/detect.py` supports a YOLO Stage 1 parking-space detector behind `--stage1-detector`. This is the repo's ML localization path for full-frame scenes. For a single fixed deployment camera, configured ROIs can still be simpler and more stable.
 
 ## Config
 
 Copy [edge/config.example.yaml](/Users/thebkht/Projects/smart-parking-system/edge/config.example.yaml) to `edge/config.yaml` and adjust:
 
 - `model.stage2_path` for the classifier checkpoint
-- `stage1.min_box_area` to reject tiny false-positive Stage 1 boxes such as road markings
+- `stage1.detector_path` for the parking-space detector checkpoint
+- `stage1.min_box_area` to reject tiny false-positive parking-space boxes such as road markings
 - `stage1.filter_mode` to choose detector spatial filtering:
   `bounds` for general scenes, `roi_center` for a fixed camera with matched slot ROIs
 - `input.frame_interval_ms` to control default camera processing cadence
@@ -32,13 +33,17 @@ Copy [edge/config.example.yaml](/Users/thebkht/Projects/smart-parking-system/edg
 - `stream.max_width` and `stream.jpeg_quality` to control default MJPEG cost
 - `postprocess.classifier_threshold` for deployed occupied/free thresholding
 - `postprocess.smoothing_window` for temporal status smoothing
-- `rois` for camera-specific parking spot boxes
+- `preprocess.perspective` to rectify an oblique camera view before ROI matching
+- `rois` for camera-specific parking-space boxes
 
-When `--stage1-detector` is enabled, the detector output is filtered in two ways before Stage 2:
+When `--stage1-detector` is enabled, the parking-space detector output is filtered before Stage 2:
 
 - boxes smaller than `stage1.min_box_area` are discarded
 - in `bounds` mode, boxes outside the union of the configured parking `rois` are discarded
 - in `roi_center` mode, a box must also have its center inside one configured slot ROI
+
+For angled cameras, configure `preprocess.perspective.source_points` and either
+`destination_points` or `output_size` in [edge/config.example.yaml](/Users/thebkht/Projects/smart-parking-system/edge/config.example.yaml). The warp runs before Stage 1/Stage 2, so the configured `rois` should match the rectified image, not the raw camera frame.
 
 ## Commands
 
@@ -90,7 +95,7 @@ python edge/detect.py \
 
 `--camera iphone` is macOS-only and expects an available Continuity Camera / iPhone camera device.
 
-Optional Stage 1 detector:
+Stage 1 parking-space detector:
 
 ```bash
 python edge/detect.py \

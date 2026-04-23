@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # run_demo.sh — Start backend + run edge inference in one command.
 # Usage:
-#   ./run_demo.sh                        # uses bundled sample image
+#   ./run_demo.sh                        # loops the bundled demo video
 #   ./run_demo.sh --image /path/to/img   # uses your own image
+#   ./run_demo.sh --video /path/to.mp4   # uses your own video
 #   ./run_demo.sh --camera 0             # live webcam mode
 #   ./run_demo.sh --camera iphone        # macOS Continuity Camera / iPhone camera
 
@@ -19,11 +20,11 @@ else
     exit 1
 fi
 
-# ── Prepare sample image if no --image / --camera arg given ──────────────────
+# ── Prepare sample source if no explicit image / video / camera arg given ────
 EXTRA_ARGS=("$@")
 USE_SAMPLE=true
 for arg in "$@"; do
-    if [[ "$arg" == "--image" || "$arg" == "--camera" ]]; then
+    if [[ "$arg" == "--image" || "$arg" == "--video" || "$arg" == "--camera" ]]; then
         USE_SAMPLE=false
         break
     fi
@@ -31,18 +32,23 @@ done
 
 if $USE_SAMPLE; then
     mkdir -p samples
+    SAMPLE_VIDEO="samples/12125602_3840_2160_30fps.mp4"
     SAMPLE_IMAGE="samples/demo.jpg"
 
-    if [ ! -f "$SAMPLE_IMAGE" ]; then
+    if [ -f "$SAMPLE_VIDEO" ]; then
+        EXTRA_ARGS=("--video" "$SAMPLE_VIDEO" "--loop-video" "${EXTRA_ARGS[@]}")
+    else
+        if [ ! -f "$SAMPLE_IMAGE" ]; then
         echo "→ Copying bundled sample image..."
         python - <<'EOF'
 import shutil
 from ultralytics.utils import ASSETS
 shutil.copy(ASSETS / "bus.jpg", "samples/demo.jpg")
 EOF
-    fi
+        fi
 
-    EXTRA_ARGS=("--image" "$SAMPLE_IMAGE" "${EXTRA_ARGS[@]}")
+        EXTRA_ARGS=("--image" "$SAMPLE_IMAGE" "${EXTRA_ARGS[@]}")
+    fi
 fi
 
 # ── Create logs dir ───────────────────────────────────────────────────────────
@@ -81,8 +87,8 @@ python edge/detect.py \
 
 echo "─────────────────────────────────────────────"
 echo ""
-echo "→ Annotated image saved to: logs/demo_annotated.jpg"
-echo "→ Log written to:           logs/parking_log_$(date +%Y-%m-%d).csv"
+echo "→ Latest annotated frame:   logs/latest_frame.jpg"
+echo "→ Log written to:           logs/parking_log_$(date +%Y-%m-%d).json"
 echo ""
 echo "→ Backend endpoints (while running):"
 echo "   GET  http://127.0.0.1:8000/health"

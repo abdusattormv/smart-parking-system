@@ -1,3 +1,4 @@
 dataset.zip filter=lfs diff=lfs merge=lfs -text
 downloads/CNR-EXT-Patches-150x150.zip filter=lfs diff=lfs merge=lfs -text
 downloads/*.zip filter=lfs diff=lfs merge=lfs -text
+samples/*.mp4 filter=lfs diff=lfs merge=lfs -text

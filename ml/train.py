@@ -71,11 +71,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--imgsz", type=int, default=None)
     parser.add_argument("--batch", type=int, default=None)
     parser.add_argument("--lr", type=float, default=None, dest="lr0")
+    parser.add_argument("--optimizer", default="AdamW", help="Ultralytics optimizer name.")
     parser.add_argument("--patience", type=int, default=None)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--no-batch-fallback", action="store_true")
     parser.add_argument("--model-dir", default=MODEL_DIR)
+    parser.add_argument("--weights", default=None, help="Override starting weights/checkpoint path.")
+    parser.add_argument("--project", default=None, help="Override Ultralytics project/output directory.")
+    parser.add_argument("--name", default=None, help="Override Ultralytics run name.")
+    parser.add_argument("--freeze", type=int, default=None, help="Freeze the first N model layers during training.")
+    parser.add_argument("--amp", dest="amp", action="store_true", default=None, help="Enable AMP.")
+    parser.add_argument("--no-amp", dest="amp", action="store_false", help="Disable AMP.")
+    parser.add_argument("--exist-ok", action="store_true", help="Allow reusing an existing run directory.")
     parser.add_argument("--degrees", type=float, default=0.0)
     parser.add_argument("--fliplr", type=float, default=0.5)
     parser.add_argument("--flipud", type=float, default=0.0)
@@ -250,11 +258,17 @@ def _patch_ultralytics_trainer_for_nan_checkpoints() -> None:
                 "Training aborted because continuing would only cascade into a missing-checkpoint failure. "
                 "Reduce augmentation or learning rate and retry."
             )
-        self.nan_recovery_attempts += 1
-        if self.nan_recovery_attempts > 3:
-            raise RuntimeError(f"Training failed: NaN persisted for {self.nan_recovery_attempts} epochs")
+        total_attempts = getattr(self, "nan_recovery_total_attempts", 0) + 1
+        self.nan_recovery_total_attempts = total_attempts
+        self.nan_recovery_attempts = getattr(self, "nan_recovery_attempts", 0) + 1
+        if total_attempts > 3:
+            raise RuntimeError(
+                f"Training failed after {total_attempts} NaN recoveries. "
+                f"Best checkpoint so far should remain available at {self.best}. "
+                "Retry with a safer optimizer or lower learning rate on MPS."
+            )
         ultralytics_trainer.LOGGER.warning(
-            f"{reason} detected (attempt {self.nan_recovery_attempts}/3), recovering from last.pt..."
+            f"{reason} detected (recovery {total_attempts}/3), recovering from last.pt..."
         )
         self._model_train()
         _, ckpt = ultralytics_trainer.load_checkpoint(self.last)
@@ -321,12 +335,12 @@ def task_defaults(args: argparse.Namespace) -> dict[str, object]:
             "task": "classify",
             "track": "stage2",
             "data_path": resolve_stage2_data(args.data),
-            "weights": f"yolov8{args.variant}-cls.pt",
+            "weights": args.weights or f"yolov8{args.variant}-cls.pt",
             "epochs": args.epochs or STAGE2_EPOCHS,
             "imgsz": args.imgsz or STAGE2_IMGSZ,
             "batch": args.batch or STAGE2_BATCH,
-            "project_dir": STAGE2_PROJECT,
-            "run_name": f"yolov8{args.variant}_stage2",
+            "project_dir": args.project or STAGE2_PROJECT,
+            "run_name": args.name or f"yolov8{args.variant}_stage2",
             "report_name": f"stage2_{args.variant}_report.json",
             "lr0": args.lr0 if args.lr0 is not None else STAGE2_LR,
             "patience": args.patience if args.patience is not None else STAGE2_PATIENCE,
@@ -338,12 +352,12 @@ def task_defaults(args: argparse.Namespace) -> dict[str, object]:
             "task": "detect",
             "track": "single_model",
             "data_path": resolve_single_model_data(args.data),
-            "weights": f"yolov8{args.variant}.pt",
+            "weights": args.weights or f"yolov8{args.variant}.pt",
             "epochs": args.epochs or SINGLE_MODEL_EPOCHS,
             "imgsz": args.imgsz or SINGLE_MODEL_IMGSZ,
             "batch": args.batch or DEFAULT_BATCH,
-            "project_dir": SINGLE_MODEL_PROJECT,
-            "run_name": f"yolov8{args.variant}_single_model",
+            "project_dir": args.project or SINGLE_MODEL_PROJECT,
+            "run_name": args.name or f"yolov8{args.variant}_single_model",
             "report_name": f"single_model_{args.variant}_report.json",
             "lr0": args.lr0 if args.lr0 is not None else SINGLE_MODEL_LR,
             "patience": args.patience if args.patience is not None else SINGLE_MODEL_PATIENCE,
@@ -354,12 +368,12 @@ def task_defaults(args: argparse.Namespace) -> dict[str, object]:
         "task": "detect",
         "track": "stage1",
         "data_path": resolve_stage1_data(args.data),
-        "weights": f"yolov8{args.variant}.pt",
+        "weights": args.weights or f"yolov8{args.variant}.pt",
         "epochs": args.epochs or STAGE1_EPOCHS,
         "imgsz": args.imgsz or STAGE1_IMGSZ,
         "batch": args.batch or DEFAULT_BATCH,
-        "project_dir": STAGE1_PROJECT,
-        "run_name": f"yolov8{args.variant}_stage1",
+        "project_dir": args.project or STAGE1_PROJECT,
+        "run_name": args.name or f"yolov8{args.variant}_stage1",
         "report_name": f"stage1_{args.variant}_report.json",
         "lr0": args.lr0 if args.lr0 is not None else STAGE1_LR,
         "patience": args.patience if args.patience is not None else STAGE1_PATIENCE,
@@ -405,13 +419,14 @@ def main() -> None:
         "epochs": defaults["epochs"],
         "imgsz": defaults["imgsz"],
         "batch": defaults["batch"],
-        "optimizer": "AdamW",
+        "optimizer": args.optimizer,
         "lr0": defaults["lr0"],
         "patience": defaults["patience"],
         "device": args.device,
         "project": defaults["project_dir"],
         "name": defaults["run_name"],
         "resume": args.resume,
+        "exist_ok": args.exist_ok,
         "verbose": True,
         "deterministic": False,
         "degrees": args.degrees,
@@ -423,6 +438,10 @@ def main() -> None:
         "dropout": defaults["dropout"],
         "cos_lr": defaults["cos_lr"],
     }
+    if args.freeze is not None:
+        train_kwargs["freeze"] = args.freeze
+    if args.amp is not None:
+        train_kwargs["amp"] = args.amp
 
     started_at = time.perf_counter()
     results = _train_with_fallback(model, train_kwargs, args)

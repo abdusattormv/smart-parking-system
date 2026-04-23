@@ -12,4 +12,4 @@ Supporting docs:
 
 Everything in this folder should describe the same v3 architecture:
 
-`static camera -> fixed ROIs -> per-spot crop -> classifier -> temporal smoothing -> JSON -> FastAPI`
+`parking-space localization -> per-space crop -> occupancy classification -> temporal smoothing -> JSON -> FastAPI`

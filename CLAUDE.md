@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Two-stage edge inference system for smart parking. Stage 1 locates spots via fixed ROI polygons (or a YOLO detector). Stage 2 classifies each cropped patch as occupied/free using YOLOv8-cls trained on PKLot + CNRPark-EXT. Only a JSON result (~1 KB) is sent to a minimal FastAPI backend — no raw video leaves the device.
+Two-stage edge inference system for smart parking. Stage 1 localizes parking spaces either through camera-specific fixed ROIs or a trained full-frame parking-space detector. Stage 2 classifies each cropped patch as occupied/free using YOLOv8-cls trained on PKLot + CNRPark-EXT. Only a JSON result (~1 KB) is sent to a minimal FastAPI backend — no raw video leaves the device.
 
 ## Environment
 
@@ -34,7 +34,7 @@ python edge/detect.py --image /path/to/parking.jpg --post                       
 python edge/detect.py --image /path/to/parking.jpg --save-annotated logs/out.jpg
 python edge/detect.py --image /path/to/parking.jpg --device cpu                        # if MPS unavailable
 python edge/detect.py --image /path/to/parking.jpg --stage2-model stage2_cls/weights/best.pt
-python edge/detect.py --image /path/to/parking.jpg --no-fixed-roi                      # use Stage 1 YOLO detector
+python edge/detect.py --image /path/to/parking.jpg --stage1-detector                  # use Stage 1 parking-space detector
 python edge/detect.py --camera 0                                                        # live camera mode
 ```
 
@@ -74,8 +74,8 @@ pytest
 Two main components:
 
 **`edge/detect.py`** — two-stage inference pipeline.
-- Stage 1: `get_spot_boxes()` returns `(x1,y1,x2,y2)` per spot. Default: fixed `FIXED_ROIS` dict. With `--no-fixed-roi`: runs a YOLO spot detector.
-- Stage 2: `classify_patch()` crops each ROI to 64×64 and runs YOLOv8-cls. Default model: `yolov8n-cls.pt` (placeholder; replace with trained `stage2_cls/weights/best.pt`).
+- Stage 1: `get_spot_boxes()` returns `(x1,y1,x2,y2)` per parking space. Default: configured fixed ROIs for a static camera. With `--stage1-detector`: runs a YOLO parking-space detector.
+- Stage 2: `classify_patch()` crops each ROI to 64×64 and runs YOLOv8-cls. Default model path comes from config and falls back to the local trained checkpoint when present.
 - Output JSON: `{spot_1: "free", confidence: {spot_1: 0.97}, timestamp: "..."}`.
 - Device defaults to `mps` with CPU fallback via `--device cpu`.
 

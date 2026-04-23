@@ -10,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from edge.detect import (
     SmoothingBuffer,
+    apply_perspective_transform,
     box_area,
     build_payload,
     classify_patch,
@@ -25,6 +26,7 @@ from edge.detect import (
     roi_bounds,
     load_rois,
     normalize_rois,
+    load_perspective_transform,
     resolve_settings,
     run_pipeline,
     write_latest_frame,
@@ -65,6 +67,9 @@ class FakeCapture:
     def read(self):
         return self._reads, np.zeros((4, 4, 3), dtype=np.uint8)
 
+    def set(self, *_args):
+        return True
+
     def release(self):
         self.released = True
 
@@ -102,6 +107,43 @@ def test_load_rois_reads_config(tmp_path):
     config = tmp_path / "config.yaml"
     config.write_text("rois:\n  a: [1, 2, 3, 4]\n", encoding="utf-8")
     assert load_rois(config) == {"a": (1, 2, 3, 4)}
+
+
+def test_load_perspective_transform_builds_output_size_from_config():
+    transform = load_perspective_transform(
+        {
+            "preprocess": {
+                "perspective": {
+                    "source_points": [[0, 0], [9, 0], [9, 9], [0, 9]],
+                    "output_size": [20, 10],
+                }
+            }
+        }
+    )
+
+    assert transform is not None
+    _matrix, output_size = transform
+    assert output_size == (20, 10)
+
+
+def test_apply_perspective_transform_returns_warped_frame():
+    frame = np.zeros((10, 10, 3), dtype=np.uint8)
+    frame[0, 0] = (255, 255, 255)
+    transform = load_perspective_transform(
+        {
+            "preprocess": {
+                "perspective": {
+                    "source_points": [[0, 0], [9, 0], [9, 9], [0, 9]],
+                    "destination_points": [[1, 0], [9, 0], [9, 9], [1, 9]],
+                    "output_size": [10, 10],
+                }
+            }
+        }
+    )
+
+    warped = apply_perspective_transform(frame, transform)
+
+    assert warped[0, 1].sum() > 0
 
 
 def test_resolve_camera_source_accepts_numeric_indexes():
@@ -377,6 +419,24 @@ def test_box_area_computes_pixel_area():
     assert box_area((10, 20, 40, 70)) == 1500
 
 
+def test_get_spot_boxes_returns_fixed_rois():
+    frame = np.zeros((300, 400, 3), dtype=np.uint8)
+    fixed_rois = {
+        "spot_1": (100, 100, 160, 180),
+        "spot_2": (170, 100, 230, 180),
+    }
+
+    boxes = get_spot_boxes(
+        frame=frame,
+        fixed_rois=fixed_rois,
+        stage1_model=None,
+        device="cpu",
+        use_stage1_detector=False,
+    )
+
+    assert boxes == fixed_rois
+
+
 def test_get_spot_boxes_filters_stage1_detections():
     frame = np.zeros((300, 400, 3), dtype=np.uint8)
     fixed_rois = {
@@ -430,8 +490,8 @@ def test_run_pipeline_uses_shared_postprocess_path():
         {
             "device": "cpu",
             "stage1_detector": False,
-            "stage2_threshold": 0.5,
             "stage1_sahi": True,
+            "stage2_threshold": 0.5,
             "stage1_imgsz": 1280,
             "stage1_slice_size": 640,
             "stage1_overlap": 0.2,

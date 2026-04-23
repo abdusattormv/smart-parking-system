@@ -4,11 +4,11 @@
 
 The repo is aligned to a two-stage edge pipeline:
 
-`static camera -> fixed ROIs -> per-spot crop -> YOLOv8*-cls -> temporal smoothing -> JSON -> FastAPI`
+`parking-space localization -> per-space crop -> YOLOv8*-cls -> temporal smoothing -> JSON -> FastAPI`
 
-- Recommended ML path: full-frame slot detector -> per-slot crop -> occupancy classifier
+- Recommended ML path: full-frame parking-space detector -> per-slot crop -> occupancy classifier
 - Deployment-specific edge demo: fixed ROI boxes from config for a static camera
-- Stage 1 primary ML track: YOLO slot detector trained with scene holdout
+- Stage 1 primary ML track: YOLO parking-space detector trained with scene holdout
 - Stage 2 primary ML track: PKLot + optional CNRPark-EXT patch classification
 - Single-model baseline: full-frame occupancy detector with `free` / `occupied` classes for ML comparison only
 - Main success metrics: Stage 1 slot-detection generalization by held-out scene and Stage 2 occupancy accuracy
@@ -20,7 +20,7 @@ The ML workflow is:
 
 1. deduplicate PKLot Roboflow source frames by normalized base id
 2. rebuild Stage 1 and single-model splits by scene holdout, not random images
-3. train Stage 1 full-frame slot detector
+3. train Stage 1 full-frame parking-space detector
 4. crop Stage 2 patches from accepted slot annotations while inheriting the same scene split
 5. optionally merge CNRPark-EXT patches
 6. train `yolov8{n,s,m}-cls`

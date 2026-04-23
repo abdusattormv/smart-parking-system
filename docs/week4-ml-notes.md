@@ -2,7 +2,7 @@
 
 Week 4 should frame the two-stage full-frame pipeline as the main ML track:
 
-`full-frame slot detector -> slot crop -> occupancy classifier`
+`full-frame parking-space detector -> space crop -> occupancy classifier`
 
 The repo also supports a single-model full-frame occupancy detector as an ML-only baseline, but it is not the deployed default path.
 
@@ -12,7 +12,7 @@ PKLot full-frame detection should be treated carefully because Roboflow exports 
 
 ## Dataset Story
 
-- primary source: PKLot Roboflow export with full-frame slot labels
+- primary source: PKLot Roboflow export with full-frame parking-space labels
 - optional source: CNRPark-EXT patch folders merged into Stage 2 training
 - canonical outputs: `stage2_data/`, `pklot_test/`, `cnrpark_test/`
 

@@ -363,6 +363,45 @@ def test_train_stage2_accuracy_defaults(monkeypatch, tmp_path):
     assert defaults["cos_lr"] is True
 
 
+def test_train_stage1_allows_custom_checkpoint_and_run_paths(monkeypatch, tmp_path):
+    yaml_path = tmp_path / "stage1.yaml"
+    yaml_path.write_text("path: /tmp\ntrain: train/images\nval: val/images\ntest: test/images\nnc: 1\nnames: [space]\n", encoding="utf-8")
+    weights = tmp_path / "best.pt"
+    weights.write_bytes(b"checkpoint")
+    monkeypatch.setattr(train, "STAGE1_YAML", str(yaml_path))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "train.py",
+            "--stage1",
+            "--weights",
+            str(weights),
+            "--project",
+            "runs/stage1_finetune",
+            "--name",
+            "my_camera",
+            "--freeze",
+            "10",
+            "--optimizer",
+            "SGD",
+            "--no-amp",
+            "--exist-ok",
+        ],
+    )
+
+    args = train.parse_args()
+    defaults = train.task_defaults(args)
+
+    assert defaults["weights"] == str(weights)
+    assert defaults["project_dir"] == "runs/stage1_finetune"
+    assert defaults["run_name"] == "my_camera"
+    assert args.freeze == 10
+    assert args.optimizer == "SGD"
+    assert args.amp is False
+    assert args.exist_ok is True
+
+
 def test_existing_checkpoint_prefers_best_then_last(tmp_path):
     best_ckpt, last_ckpt = train._checkpoint_paths(str(tmp_path / "runs"), "exp")
     last_ckpt.parent.mkdir(parents=True, exist_ok=True)

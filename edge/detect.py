@@ -4,9 +4,9 @@
 Default path:
   static camera -> fixed ROIs -> crop each spot -> YOLOv8-cls -> smoothing -> JSON
 
-Optional Stage 1:
-  enable --stage1-detector to discover spot boxes with a YOLO detector instead of
-  using configured fixed ROIs.
+ML Stage 1 path:
+  enable --stage1-detector to run a full-frame parking-space detector before
+  Stage 2 occupancy classification.
 """
 
 from __future__ import annotations
@@ -30,6 +30,7 @@ import yaml
 from ultralytics import YOLO
 
 STAGE2_MODEL_DEFAULT = "yolov8n-cls.pt"
+DEFAULT_STAGE1_LOCAL_CHECKPOINT = "runs/stage1_det/yolov8s_stage1/weights/best.pt"
 STAGE1_MODEL_DEFAULT = "yolov8n.pt"
 DEFAULT_BACKEND_URL = "http://127.0.0.1:8000/update"
 DEFAULT_BACKEND_TIMEOUT_S = 0.75
@@ -61,6 +62,8 @@ DEFAULT_ROIS: Dict[str, Tuple[int, int, int, int]] = {
     "spot_4": (530, 100, 680, 250),
 }
 
+PerspectiveTransform = Tuple[np.ndarray, Tuple[int, int]]
+
 
 def load_config(config_path: Path) -> dict:
     if not config_path.exists():
@@ -72,12 +75,14 @@ def load_config(config_path: Path) -> dict:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Run the v3 smart parking edge pipeline. Fixed ROIs are the default "
-            "Stage 1 path; YOLO spot detection is optional behind --stage1-detector."
+            "Run the v3 smart parking edge pipeline. Fixed ROIs remain the "
+            "static-camera path; --stage1-detector enables a parking-space "
+            "detector for full-frame localization."
         )
     )
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--image", help="Path to a parking image (static mode).")
+    group.add_argument("--video", help="Path to a parking video file.")
     group.add_argument(
         "--camera",
         metavar="SOURCE",
@@ -92,12 +97,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--stage1-model",
         default=None,
-        help="Optional Stage 1 detector checkpoint used with --stage1-detector.",
+        help="Stage 1 parking-space detector checkpoint used with --stage1-detector.",
     )
     parser.add_argument(
         "--stage1-detector",
         action="store_true",
-        help="Use YOLO Stage 1 detection instead of fixed ROIs.",
+        help="Use the Stage 1 parking-space detector instead of fixed ROIs.",
     )
     parser.add_argument("--device", default=None, help="Inference device. Default from config.")
     parser.add_argument("--backend-url", default=DEFAULT_BACKEND_URL)
@@ -149,6 +154,11 @@ def parse_args() -> argparse.Namespace:
         default=None,
         metavar="SEC",
         help="Seconds between backend POSTs in camera mode.",
+    )
+    parser.add_argument(
+        "--loop-video",
+        action="store_true",
+        help="Loop the input video file when it reaches the end.",
     )
     parser.add_argument("--log-dir", default=None)
     parser.add_argument("--log-format", choices=["csv", "json"], default=None)
@@ -299,6 +309,15 @@ def resolve_settings(args: argparse.Namespace, cfg: dict) -> argparse.Namespace:
                 f"Stage 2 model not found at {configured_stage2_path}; "
                 f"using {local_stage2_checkpoint}."
             )
+    configured_stage1_path = Path(str(args.stage1_model))
+    if args.stage1_detector and not configured_stage1_path.exists():
+        local_stage1_checkpoint = Path(DEFAULT_STAGE1_LOCAL_CHECKPOINT)
+        if local_stage1_checkpoint.exists():
+            args.stage1_model = str(local_stage1_checkpoint)
+            print(
+                f"Stage 1 model not found at {configured_stage1_path}; "
+                f"using {local_stage1_checkpoint}."
+            )
     return args
 
 
@@ -318,6 +337,74 @@ def normalize_rois(raw_rois: dict | None) -> Dict[str, Tuple[int, int, int, int]
 def load_rois(config_path: Path) -> Dict[str, Tuple[int, int, int, int]]:
     cfg = load_config(config_path)
     return normalize_rois(cfg.get("rois"))
+
+
+def _normalize_points(raw_points: Any, label: str) -> np.ndarray:
+    if not isinstance(raw_points, (list, tuple)) or len(raw_points) != 4:
+        raise ValueError(f"{label} must contain exactly 4 [x, y] points.")
+    points: list[Tuple[float, float]] = []
+    for point in raw_points:
+        if not isinstance(point, (list, tuple)) or len(point) != 2:
+            raise ValueError(f"{label} entries must be [x, y] pairs.")
+        x, y = point
+        points.append((float(x), float(y)))
+    return np.array(points, dtype=np.float32)
+
+
+def load_perspective_transform(cfg: dict) -> Optional[PerspectiveTransform]:
+    preprocess_cfg = cfg.get("preprocess", {})
+    perspective_cfg = preprocess_cfg.get("perspective")
+    if not perspective_cfg:
+        return None
+
+    source_points = _normalize_points(perspective_cfg.get("source_points"), "preprocess.perspective.source_points")
+    destination_points_raw = perspective_cfg.get("destination_points")
+    output_size_raw = perspective_cfg.get("output_size")
+
+    if destination_points_raw is None and output_size_raw is None:
+        raise ValueError(
+            "Perspective preprocessing requires either destination_points or output_size."
+        )
+
+    if destination_points_raw is not None:
+        destination_points = _normalize_points(
+            destination_points_raw,
+            "preprocess.perspective.destination_points",
+        )
+        if output_size_raw is None:
+            max_x = int(np.ceil(float(destination_points[:, 0].max())))
+            max_y = int(np.ceil(float(destination_points[:, 1].max())))
+            output_size = (max_x, max_y)
+        else:
+            if not isinstance(output_size_raw, (list, tuple)) or len(output_size_raw) != 2:
+                raise ValueError("preprocess.perspective.output_size must be [width, height].")
+            output_size = (int(output_size_raw[0]), int(output_size_raw[1]))
+    else:
+        if not isinstance(output_size_raw, (list, tuple)) or len(output_size_raw) != 2:
+            raise ValueError("preprocess.perspective.output_size must be [width, height].")
+        width, height = (int(output_size_raw[0]), int(output_size_raw[1]))
+        destination_points = np.array(
+            [[0, 0], [width - 1, 0], [width - 1, height - 1], [0, height - 1]],
+            dtype=np.float32,
+        )
+        output_size = (width, height)
+
+    width, height = output_size
+    if width <= 0 or height <= 0:
+        raise ValueError("preprocess.perspective.output_size values must be positive.")
+
+    matrix = cv2.getPerspectiveTransform(source_points, destination_points)
+    return matrix, (width, height)
+
+
+def apply_perspective_transform(
+    frame: np.ndarray,
+    transform: Optional[PerspectiveTransform],
+) -> np.ndarray:
+    if transform is None:
+        return frame
+    matrix, (width, height) = transform
+    return cv2.warpPerspective(frame, matrix, (width, height))
 
 
 class SmoothingBuffer:
@@ -427,11 +514,13 @@ def get_spot_boxes(
     if not use_stage1_detector:
         return fixed_rois
     if stage1_model is None:
-        raise ValueError("Stage 1 detector requested but no model was loaded.")
+        raise ValueError("Stage 1 parking-space detector requested but no model was loaded.")
 
     # Stage 1 is always a YOLO .pt — Core ML only applies to stage 2
     yolo_device = device if device != "coreml" else "cpu"
     lot_mask = roi_bounds(fixed_rois)
+
+    roi_boxes = list(fixed_rois.values())
 
     if use_sahi:
         try:
@@ -459,21 +548,41 @@ def get_spot_boxes(
             )
             os.unlink(tmp_path)
             boxes: Dict[str, Tuple[int, int, int, int]] = {}
-            for index, pred in enumerate(result.object_prediction_list, start=1):
+            next_index = 1
+            for pred in result.object_prediction_list:
                 b = pred.bbox
-                x1, y1, x2, y2 = int(b.minx), int(b.miny), int(b.maxx), int(b.maxy)
-                if x2 > x1 and y2 > y1:
-                    boxes[f"spot_{index}"] = (x1, y1, x2, y2)
+                kept = filter_stage1_box(
+                    frame.shape,
+                    (int(b.minx), int(b.miny), int(b.maxx), int(b.maxy)),
+                    lot_mask=lot_mask,
+                    roi_boxes=roi_boxes,
+                    min_box_area=min_box_area,
+                    filter_mode=filter_mode,
+                )
+                if kept is None:
+                    continue
+                boxes[f"spot_{next_index}"] = kept
+                next_index += 1
             return boxes
         except ImportError:
             print("SAHI not installed; falling back to standard inference.")
 
     results = stage1_model(frame, device=yolo_device, verbose=False, imgsz=stage1_imgsz)[0]
     boxes = {}
-    for index, box in enumerate(results.boxes.xyxy.cpu().numpy(), start=1):
-        x1, y1, x2, y2 = box.astype(int)
-        if x2 > x1 and y2 > y1:
-            boxes[f"spot_{index}"] = (int(x1), int(y1), int(x2), int(y2))
+    next_index = 1
+    for box in results.boxes.xyxy.cpu().numpy():
+        kept = filter_stage1_box(
+            frame.shape,
+            tuple(box.astype(int)),
+            lot_mask=lot_mask,
+            roi_boxes=roi_boxes,
+            min_box_area=min_box_area,
+            filter_mode=filter_mode,
+        )
+        if kept is None:
+            continue
+        boxes[f"spot_{next_index}"] = kept
+        next_index += 1
     return boxes
 
 
@@ -911,6 +1020,7 @@ def run_inference(args: argparse.Namespace, fixed_rois: Dict[str, Tuple[int, int
         if frame is None:
             print(f"Warning: OpenCV could not read image, skipping: {image_path}")
             continue
+        frame = apply_perspective_transform(frame, getattr(args, "perspective_transform", None))
 
         # Reset smoothing buffer per image in batch mode so frames don't bleed together
         if len(image_paths) > 1:
@@ -978,6 +1088,7 @@ def run_camera(args: argparse.Namespace, fixed_rois: Dict[str, Tuple[int, int, i
                 time.sleep(0.05)
                 continue
             consecutive_failures = 0
+            frame = apply_perspective_transform(frame, getattr(args, "perspective_transform", None))
 
             started_at = time.perf_counter()
             payload, spot_boxes = run_pipeline(
@@ -1020,11 +1131,79 @@ def run_camera(args: argparse.Namespace, fixed_rois: Dict[str, Tuple[int, int, i
             )
     return 0
 
+
+def run_video(args: argparse.Namespace, fixed_rois: Dict[str, Tuple[int, int, int, int]]) -> int:
+    video_path = Path(str(args.video))
+    if not video_path.exists():
+        raise FileNotFoundError(f"Video path not found: {video_path}")
+
+    stage1_model, stage2_model = create_models(args)
+    smooth_buf = SmoothingBuffer(window=args.smooth_n)
+    latest_frame_path = Path(args.latest_frame_path)
+
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        raise RuntimeError(f"Cannot open video file: {video_path}")
+
+    last_post = time.perf_counter() - args.post_interval
+    backend_retry_after = 0.0
+    last_confidences: Dict[str, float] = {}
+
+    try:
+        while True:
+            ok, frame = cap.read()
+            if not ok:
+                if args.loop_video:
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                    smooth_buf.reset()
+                    last_confidences.clear()
+                    continue
+                break
+
+            frame = apply_perspective_transform(frame, getattr(args, "perspective_transform", None))
+
+            started_at = time.perf_counter()
+            payload, spot_boxes = run_pipeline(
+                frame, fixed_rois, stage1_model, stage2_model, smooth_buf, args, last_confidences
+            )
+            annotated = annotate_frame(frame, payload["spots"], spot_boxes, payload["confidence"])
+            write_latest_frame(
+                annotated,
+                latest_frame_path,
+                jpeg_quality=args.stream_jpeg_quality,
+                max_width=args.stream_max_width,
+            )
+
+            now = time.perf_counter()
+            if now - last_post >= args.post_interval:
+                print(json.dumps(payload))
+                log_result(payload, Path(args.log_dir), args.log_format)
+                if args.post and now >= backend_retry_after:
+                    try:
+                        post_payload(payload, args.backend_url, args.backend_timeout)
+                        backend_retry_after = 0.0
+                    except requests.RequestException as exc:
+                        backend_retry_after = now + args.backend_retry_delay
+                        print(f"Backend POST failed: {exc}")
+                last_post = now
+
+            elapsed = time.perf_counter() - started_at
+            sleep_s = max(0.0, args.frame_interval / 1000.0 - elapsed)
+            if sleep_s:
+                time.sleep(sleep_s)
+
+    except KeyboardInterrupt:
+        print("\nStopped by user.")
+    finally:
+        cap.release()
+    return 0
+
 def main() -> None:
     args = parse_args()
     cfg = load_config(Path(args.config))
     args = resolve_settings(args, cfg)
     fixed_rois = normalize_rois(cfg.get("rois"))
+    args.perspective_transform = load_perspective_transform(cfg)
 
     if args.camera is not None:
         (
@@ -1044,6 +1223,8 @@ def main() -> None:
                 f"Built-in camera fallback is ready on index {args.fallback_camera}."
             )
         raise SystemExit(run_camera(args, fixed_rois))
+    if args.video is not None:
+        raise SystemExit(run_video(args, fixed_rois))
     raise SystemExit(run_inference(args, fixed_rois))
 
 

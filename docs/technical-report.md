@@ -2,7 +2,7 @@
 
 ## Abstract
 
-This project implements a two-stage smart parking system that performs inference on an edge device rather than streaming raw video to the cloud. The deployed pipeline uses a Stage 1 YOLO detector to localize parking spots in full-frame images, then applies a Stage 2 YOLOv8 classification model to cropped spot patches to predict `free` or `occupied`. The system outputs compact JSON payloads and stores them through a minimal FastAPI backend. In the checked-in final artifact set, the Stage 1 detector achieved up to 0.995 mAP@50 on a scene-held-out validation split, while the selected Stage 2 classifier (`yolov8m-cls`) reached 0.8958 top-1 accuracy and 0.8994 F1 at the default threshold of 0.5, improving to 0.9187 accuracy and 0.9242 F1 at the best offline threshold of 0.1. The runtime benchmark reached 350.8 FPS on Apple MPS and 2290.7 FPS for the exported Core ML INT8 artifact. Compared with a conservative 1080p H.264 camera stream, the JSON reporting path reduced bandwidth by 99.9%.
+This project implements a two-stage smart parking system that performs inference on an edge device rather than streaming raw video to the cloud. The deployed pipeline uses a Stage 1 YOLO parking-space detector to localize parking spaces in full-frame images, then applies a Stage 2 YOLOv8 classification model to cropped space patches to predict `free` or `occupied`. The system outputs compact JSON payloads and stores them through a minimal FastAPI backend. In the checked-in final artifact set, the Stage 1 detector achieved up to 0.995 mAP@50 on a scene-held-out validation split, while the selected Stage 2 classifier (`yolov8m-cls`) reached 0.8958 top-1 accuracy and 0.8994 F1 at the default threshold of 0.5, improving to 0.9187 accuracy and 0.9242 F1 at the best offline threshold of 0.1. The runtime benchmark reached 350.8 FPS on Apple MPS and 2290.7 FPS for the exported Core ML INT8 artifact. Compared with a conservative 1080p H.264 camera stream, the JSON reporting path reduced bandwidth by 99.9%.
 
 ## 1. Introduction
 
@@ -30,11 +30,11 @@ This contract is produced by the edge pipeline and stored unchanged by the backe
 
 The central design decision in this project is the use of a two-stage pipeline:
 
-`full-frame parking scene -> spot localization -> per-spot crop -> occupancy classification`
+`full-frame parking scene -> parking-space localization -> per-space crop -> occupancy classification`
 
 This separation is necessary because the available datasets are naturally split across two tasks:
 
-- full-frame spot localization from parking-scene images
+- full-frame parking-space localization from parking-scene images
 - patch-level occupied/free classification from cropped parking-spot images
 
 Using a single detector trained directly on patch-style data is not the right formulation for the occupancy problem in full-frame scenes. For this reason, the repo keeps a single-model occupancy detector only as an ML comparison baseline, not as the deployed default.
@@ -46,7 +46,7 @@ The final runtime supports both:
 
 The checked-in final runbook and artifact set use the trained two-stage path as the canonical system:
 
-`trained Stage 1 detector -> crop -> trained Stage 2 classifier -> smoothing -> JSON -> FastAPI`
+`trained Stage 1 parking-space detector -> crop -> trained Stage 2 classifier -> smoothing -> JSON -> FastAPI`
 
 ## 3. System Architecture
 
@@ -56,7 +56,7 @@ The system is organized into three layers.
 
 The edge device runs both inference stages locally.
 
-- Stage 1: spot localization with YOLO detection
+- Stage 1: parking-space localization with YOLO detection
 - Stage 2: crop classification with YOLOv8 classification
 - Post-processing: temporal smoothing over spot status history
 - Output: structured JSON payload
@@ -285,7 +285,7 @@ Another important detail is threshold policy. The best offline threshold for the
 
 ## 9. Conclusion
 
-This project demonstrates that a laptop-based edge parking system can combine full-frame spot localization and per-spot occupancy classification into a practical two-stage inference pipeline. The checked-in final system uses a YOLO Stage 1 detector and a `yolov8m-cls` Stage 2 classifier, achieves strong in-domain classification performance, maintains useful cross-dataset generalization, runs at real-time speeds on Apple MPS, and reduces bandwidth by more than 99.9% compared with continuous video transmission.
+This project demonstrates that a laptop-based edge parking system can combine full-frame parking-space localization and per-space occupancy classification into a practical two-stage inference pipeline. The checked-in final system uses a YOLO Stage 1 parking-space detector and a `yolov8m-cls` Stage 2 classifier, achieves strong in-domain classification performance, maintains useful cross-dataset generalization, runs at real-time speeds on Apple MPS, and reduces bandwidth by more than 99.9% compared with continuous video transmission.
 
 The final repo state is suitable for class demonstration and technical submission because it includes:
 

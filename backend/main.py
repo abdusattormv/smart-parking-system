@@ -64,10 +64,11 @@ def utc_now_iso() -> str:
 async def generate_mjpeg_stream(
     frame_path: Path = LATEST_FRAME_PATH,
     poll_interval: float = 0.1,
-    max_poll_interval: float = 0.5,
+    resend_interval: float = 0.25,
 ):
     last_signature: tuple[int, int] | None = None
-    current_interval = poll_interval
+    last_frame_bytes: bytes | None = None
+    last_sent_at = 0.0
     while True:
         try:
             stat = frame_path.stat()
@@ -76,32 +77,16 @@ async def generate_mjpeg_stream(
                 frame_bytes = frame_path.read_bytes()
                 if frame_bytes:
                     last_signature = signature
-                    current_interval = poll_interval  # reset on new frame
+                    last_frame_bytes = frame_bytes
+                    last_sent_at = 0.0
+            if last_frame_bytes:
+                now = datetime.now(timezone.utc).timestamp()
+                if last_sent_at == 0.0 or now - last_sent_at >= resend_interval:
+                    last_sent_at = now
                     yield (
                         b"--frame\r\n"
                         b"Content-Type: image/jpeg\r\n\r\n"
-                        + frame_bytes
-                        + b"\r\n"
-                    )
-            else:
-                # Back off when no new frame — reduces file I/O contention
-                current_interval = min(current_interval * 1.2, max_poll_interval)
-        except FileNotFoundError:
-            current_interval = max_poll_interval
-        await sleep(current_interval)
-    last_signature: tuple[int, int] | None = None
-    while True:
-        try:
-            stat = frame_path.stat()
-            signature = (stat.st_mtime_ns, stat.st_size)
-            if signature != last_signature:
-                frame_bytes = frame_path.read_bytes()
-                if frame_bytes:
-                    last_signature = signature
-                    yield (
-                        b"--frame\r\n"
-                        b"Content-Type: image/jpeg\r\n\r\n"
-                        + frame_bytes
+                        + last_frame_bytes
                         + b"\r\n"
                     )
         except FileNotFoundError:
