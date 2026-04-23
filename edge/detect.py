@@ -881,33 +881,69 @@ def handoff_to_builtin_camera(index: Optional[int], backend: Optional[int]) -> N
 
 
 def run_inference(args: argparse.Namespace, fixed_rois: Dict[str, Tuple[int, int, int, int]]) -> int:
-    image_path = Path(args.image)
-    if not image_path.exists():
-        raise FileNotFoundError(f"Image not found: {image_path}")
+    import glob
 
-    frame = cv2.imread(str(image_path))
-    if frame is None:
-        raise ValueError(f"OpenCV could not read image: {image_path}")
+    input_path = Path(args.image)
+    if not input_path.exists():
+        raise FileNotFoundError(f"Image path not found: {input_path}")
+
+    # Collect image paths — support both a single file and a directory
+    IMAGE_EXTS = ("*.jpg", "*.jpeg", "*.png", "*.bmp", "*.webp", "*.tiff", "*.tif")
+    if input_path.is_dir():
+        image_paths: list[Path] = []
+        for ext in IMAGE_EXTS:
+            image_paths.extend(sorted(input_path.glob(ext)))
+            image_paths.extend(sorted(input_path.glob(ext.upper())))
+        # Deduplicate while preserving order
+        seen: set[Path] = set()
+        image_paths = [p for p in image_paths if not (p in seen or seen.add(p))]
+        if not image_paths:
+            raise ValueError(f"No images found in directory: {input_path}")
+        print(f"Found {len(image_paths)} image(s) in {input_path}")
+    else:
+        image_paths = [input_path]
 
     stage1_model, stage2_model = create_models(args)
     smooth_buf = SmoothingBuffer(window=args.smooth_n)
-    payload, spot_boxes = run_pipeline(frame, fixed_rois, stage1_model, stage2_model, smooth_buf, args)
 
-    print(json.dumps(payload, indent=2))
-    log_result(payload, Path(args.log_dir), args.log_format)
+    for image_path in image_paths:
+        frame = cv2.imread(str(image_path))
+        if frame is None:
+            print(f"Warning: OpenCV could not read image, skipping: {image_path}")
+            continue
 
-    if args.save_annotated:
-        output_path = Path(args.save_annotated)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        cv2.imwrite(str(output_path), annotate_frame(frame, payload["spots"], spot_boxes, payload["confidence"]))
+        # Reset smoothing buffer per image in batch mode so frames don't bleed together
+        if len(image_paths) > 1:
+            smooth_buf.reset()
 
-    if args.post:
-        try:
-            post_payload(payload, args.backend_url, args.backend_timeout)
-        except requests.RequestException as exc:
-            print(f"Backend POST failed: {exc}")
+        payload, spot_boxes = run_pipeline(frame, fixed_rois, stage1_model, stage2_model, smooth_buf, args)
+
+        print(f"\n--- {image_path.name} ---")
+        print(json.dumps(payload, indent=2))
+        log_result(payload, Path(args.log_dir), args.log_format)
+
+        if args.save_annotated:
+            save_dir = Path(args.save_annotated)
+            save_dir.mkdir(parents=True, exist_ok=True)
+            # Directory input → save each file under its original name in save_dir
+            # Single file input → honour the exact path the user provided
+            if input_path.is_dir():
+                out_file = save_dir / image_path.name
+            else:
+                out_file = save_dir if save_dir.suffix else save_dir / image_path.name
+            cv2.imwrite(
+                str(out_file),
+                annotate_frame(frame, payload["spots"], spot_boxes, payload["confidence"]),
+            )
+            print(f"Annotated image saved to: {out_file}")
+
+        if args.post:
+            try:
+                post_payload(payload, args.backend_url, args.backend_timeout)
+            except requests.RequestException as exc:
+                print(f"Backend POST failed: {exc}")
+
     return 0
-
 
 import threading
 import queue
